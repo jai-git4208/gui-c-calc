@@ -291,17 +291,70 @@ void drawText(SDL_Renderer *ren, const char *text, int x, int y, int scale) {
 int showHistory = 0;
 Button histBtn;
 
+SDL_Rect displayRect;
+
+void updateLayout(int width, int height){
+  int sidebarWidth = showHistory ? 200 : 0;
+  int calcWidth = width - sidebarWidth;
+  if (calcWidth < 200)
+    calcWidth = 200;
+  displayRect = (SDL_Rect){20, 20, calcWidth -40, 50};
+
+  histBtn.rect = (SDL_Rect){20, 80, 60, 30};
+  //keypad
+  int startY = 120;
+  int padH = height - startY -20;
+  if (padH < 200)
+    padH = 200;
+  int padW = calcWidth - 40;
+  int gap = 10;
+
+  int bw = (padW - 3 * gap)/4;
+  int bh = (padH -3 * gap)/4;
+
+  int btnIdx = 0;
+  int startX = 20;
+  //digits 1-9
+  for (int row = 0; row < 3; row++){
+    for (int col = 0; col<3; col++){
+      if(btnIdx < 9){
+        buttons[btnIdx].rect = (SDL_Rect){startX + col* (bw+gap), startY + row*(bh + gap), bw, bh};
+        btnIdx++;
+      }
+    }
+  }
+
+   // 0
+  if (btnIdx < numButtons)
+    buttons[btnIdx++].rect =
+        (SDL_Rect){startX, startY + 3 * (bh + gap), bw, bh};
+  // =
+  if (btnIdx < numButtons)
+    buttons[btnIdx++].rect =
+        (SDL_Rect){startX + (bw + gap), startY + 3 * (bh + gap), bw, bh};
+  // C
+  if (btnIdx < numButtons)
+    buttons[btnIdx++].rect =
+        (SDL_Rect){startX + 2 * (bw + gap), startY + 3 * (bh + gap), bw, bh};
+  //oops
+  for(int i = 0; i<4; i++){
+    if(btnIdx < numButtons){
+      buttons[btnIdx++].rect =
+          (SDL_Rect){startX + 3 * (bw + gap), startY + i * (bh + gap), bw, bh};
+    }
+  }
+}
+
 void initButtons(void) {
-  int bw = 60, bh = 50, gap = 10;
-  int startX = 20, startY = 120; // Moved down from 90
+  // Create buttons with dummy rects, updateLayout will fix them
+  // We just need to set labels and colors
+  numButtons = 0;
 
   // Digit buttons 1-9
   int nums[3][3] = {{7, 8, 9}, {4, 5, 6}, {1, 2, 3}};
   for (int row = 0; row < 3; row++) {
     for (int col = 0; col < 3; col++) {
       Button *b = &buttons[numButtons++];
-      b->rect = (SDL_Rect){startX + col * (bw + gap), startY + row * (bh + gap),
-                           bw, bh};
       snprintf(b->label, sizeof(b->label), "%d", nums[row][col]);
       b->color = COLOR_DIGIT;
     }
@@ -309,20 +362,16 @@ void initButtons(void) {
 
   // 0 button
   Button *b0 = &buttons[numButtons++];
-  b0->rect = (SDL_Rect){startX, startY + 3 * (bh + gap), bw, bh};
   strcpy(b0->label, "0");
   b0->color = COLOR_DIGIT;
 
   // = button
   Button *beq = &buttons[numButtons++];
-  beq->rect = (SDL_Rect){startX + (bw + gap), startY + 3 * (bh + gap), bw, bh};
   strcpy(beq->label, "=");
   beq->color = COLOR_OP;
 
   // C button
   Button *bc = &buttons[numButtons++];
-  bc->rect =
-      (SDL_Rect){startX + 2 * (bw + gap), startY + 3 * (bh + gap), bw, bh};
   strcpy(bc->label, "C");
   bc->color = COLOR_CLEAR;
 
@@ -330,41 +379,55 @@ void initButtons(void) {
   char ops[4] = {'+', '-', '*', '/'};
   for (int i = 0; i < 4; i++) {
     Button *bop = &buttons[numButtons++];
-    bop->rect =
-        (SDL_Rect){startX + 3 * (bw + gap), startY + i * (bh + gap), bw, bh};
     snprintf(bop->label, sizeof(bop->label), "%c", ops[i]);
     bop->color = COLOR_OP;
   }
 
   // History Toggle Button
-  histBtn.rect = (SDL_Rect){20, 80, 60, 30}; // Left-aligned
   strcpy(histBtn.label, "HIST");
   histBtn.color = COLOR_OP;
+
+  // Initial layout
+  updateLayout(300, 390);
 }
 
 // Global window pointer for resizing
 static SDL_Window *gWindow = NULL;
 
-void handleButtonClick(int x, int y){
+void handleButtonClick(int x, int y) {
   SDL_Window *win = gWindow;
-  //History button
-  if (x >= histBtn.rect.x && x < histBtn.rect.x + histBtn.rect.w && y >= histBtn.rect.y && y < histBtn.rect.h){
+
+  // History Button
+  if (x >= histBtn.rect.x && x < histBtn.rect.x + histBtn.rect.w &&
+      y >= histBtn.rect.y && y < histBtn.rect.y + histBtn.rect.h) {
     showHistory = !showHistory;
-    SDL_SetWindowSize(win, showHistory ? 500 : 300, 390);
+    int w, h;
+    SDL_GetWindowSize(win, &w, &h);
+    // Toggle width based on state?
+    // If we are showing history, add 200. If hiding, subtract 200.
+    // Or just enforce min width?
+    // Let's stick to the toggle logic: compact (300) vs expanded (500)
+    // BUT conserve height.
+    SDL_SetWindowSize(win, showHistory ? 500 : 300, h);
+    // updateLayout will be called by window event
     return;
   }
 
-  //History sidebar
-  if (showHistory && x > 300){
-    int startY = 20;
-    int itemH = 40;
-    int index = (y = startY)/ itemH;
-    if(index >= 0 && index < historyCount){
-      loadHistory(index);
+  // History sidebar click
+  if (showHistory) { // Click is outside calculator area (approx)
+    // Better check: x > window_width - 200
+    int w, h;
+    SDL_GetWindowSize(win, &w, &h);
+    if (x > w - 200) {
+      int startY = 20;
+      int itemH = 40;
+      int index = (y - startY) / itemH; // Fixed bug (y = startY)
+      if (index >= 0 && index < historyCount) {
+        loadHistory(index);
+      }
       return;
     }
   }
-
 
   // Calculator buttons
   for (int i = 0; i < numButtons; i++) {
@@ -436,45 +499,56 @@ void handleKeyboard(SDL_Keycode key) {
 }
 
 void render(SDL_Renderer *ren) {
+  int w, h;
+  SDL_GetWindowSize(gWindow, &w, &h);
+
+  static int lastW = 0, lastH = 0;
+  if (w!= lastW || h != lastH){
+    updateLayout(w, h);
+    lastW = w;
+    lastH = h;
+  }
+
   // Background
   SDL_SetRenderDrawColor(ren, COLOR_BG.r, COLOR_BG.g, COLOR_BG.b, 255);
   SDL_RenderClear(ren);
 
   // --- Sidebar (History) ---
   if (showHistory) {
-    SDL_Rect sidebar = {300, 0, 200, 390}; // Height 390
+    // Logic: Sidebar is rightmost 200px
+    int sidebarX = w - 200;
+    SDL_Rect sidebar = {sidebarX, 0, 200, h};
     SDL_SetRenderDrawColor(ren, 40, 40, 40, 255);
     SDL_RenderFillRect(ren, &sidebar);
 
     // Separator line
     SDL_SetRenderDrawColor(ren, 60, 60, 60, 255);
-    SDL_RenderDrawLine(ren, 300, 0, 300, 390); // Height 390
+    SDL_RenderDrawLine(ren, sidebarX, 0, sidebarX, h);
 
-    // History Itemsss
+    // History Items
     for (int i = 0; i < historyCount; i++) {
       int y = 20 + i * 40;
 
-      // Equation centered/leftish
+      // Equation centered/leftish of sidebar
       SDL_SetRenderDrawColor(ren, 150, 150, 150, 255);
-      drawText(ren, history[i].equation, 310, y, 2);
+      drawText(ren, history[i].equation, sidebarX + 10, y, 2);
 
       // Result
       char resStr[32];
       snprintf(resStr, sizeof(resStr), "%g", history[i].result);
-      // Format if possible?
+      // Format
       char fmtRes[64];
       formatNumber(resStr, fmtRes, sizeof(fmtRes));
 
       SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b,
                              255);
-      drawText(ren, fmtRes, 310, y + 15, 3);
+      drawText(ren, fmtRes, sidebarX + 10, y + 15, 3);
     }
   }
 
   // --- Calculator ---
 
-  // Display background
-  SDL_Rect displayRect = {20, 20, 260, 50};
+  // Display background (use global displayRect)
   SDL_SetRenderDrawColor(ren, COLOR_DISPLAY.r, COLOR_DISPLAY.g, COLOR_DISPLAY.b,
                          255);
   SDL_RenderFillRect(ren, &displayRect);
@@ -510,9 +584,6 @@ void render(SDL_Renderer *ren) {
                          255);
   SDL_RenderFillRect(ren, &histBtn.rect);
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-  // Center Label "HIST" (4 chars * 4px width * 2 scale = 32px wide; 5px height
-  // * 2 scale = 10px high) Button 60x30. x = start + (60 - 32)/2 = start + 14
-  // y = start + (30 - 10)/2 = start + 10
   drawText(ren, "HIST", histBtn.rect.x + 14, histBtn.rect.y + 10, 2);
 
   // Buttons
