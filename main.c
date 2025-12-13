@@ -11,6 +11,9 @@ typedef struct {
   char pendingOp;
   int hasPendingOp;
   int clearOnNextDigit;
+  // RPN Stack (X, Y, Z, T rule, but lets keep it simple: Stack of 4)
+  double stack[4];
+  int stackSize;
 } Calculator;
 
 // Button definition
@@ -29,7 +32,7 @@ SDL_Color COLOR_CLEAR = {165, 165, 165, 255};
 SDL_Color COLOR_TEXT = {255, 255, 255, 255};
 
 // Global calculator
-Calculator calc = {"0", 0, 0, 0, 0};
+Calculator calc = {"0", 0, 0, 0, 0, {0, 0, 0, 0}, 0};
 Button buttons[40];
 int numButtons = 0;
 
@@ -49,7 +52,8 @@ typedef enum {
   MODE_BASIC,
   MODE_DRAW,
   MODE_SCIENTIFIC,
-  MODE_UNIT
+  MODE_UNIT,
+  MODE_RPN
 } CalculatorMode;
 CalculatorMode currentMode = MODE_BASIC;
 int isDropdownOpen = 0;
@@ -66,6 +70,8 @@ void triggerClickAnim(int type, int idx) {
   clickAnimIdx = idx;
   clickAnimTime = SDL_GetTicks();
 }
+
+void calc_inputEquals(void);
 
 void calc_inputDigit(const char *digit) {
   if (strcmp(digit, ".") == 0) {
@@ -114,9 +120,60 @@ void calc_inputUnit(const char *type) {
     val *= 2.20462;
   else if (strcmp(type, "lb2kg") == 0)
     val /= 2.20462;
+  else if (strcmp(type, "km2mi") == 0)
+    val *= 0.621371;
+  else if (strcmp(type, "mi2km") == 0)
+    val *= 1.60934;
+  else if (strcmp(type, "C2F") == 0)
+    val = val * 9.0 / 5.0 + 32.0;
+  else if (strcmp(type, "F2C") == 0)
+    val = (val - 32.0) * 5.0 / 9.0;
 
   snprintf(calc.display, sizeof(calc.display), "%.10g", val);
   calc.clearOnNextDigit = 1;
+}
+
+// RPN Helpers
+void calc_stackPush(double val) {
+  // Shift: T=Z, Z=Y, Y=X
+  calc.stack[3] = calc.stack[2];
+  calc.stack[2] = calc.stack[1];
+  calc.stack[1] = calc.stack[0];
+  calc.stack[0] = val;
+}
+
+double calc_stackPop() {
+  double val = calc.stack[0];
+  // Shift: X=Y, Y=Z, Z=T
+  calc.stack[0] = calc.stack[1];
+  calc.stack[1] = calc.stack[2];
+  calc.stack[2] = calc.stack[3];
+  // T stays same or becomes 0? HP behavior: T duplicates.
+  // Let's just keep T or set to 0. 0 is safer for now.
+  calc.stack[3] = 0;
+  return val;
+}
+
+void calc_inputRPN(const char *op) {
+  if (strcmp(op, "ENT") == 0) {
+    calc_stackPush(atof(calc.display));
+    calc.clearOnNextDigit = 1;
+  } else if (strcmp(op, "SWP") == 0) {
+    double tmp = calc.stack[0];
+    calc.stack[0] = calc.stack[1];
+    calc.stack[1] = tmp;
+    // Update display to match top of stack? In RPN, display is usually X
+    // register. So yes, display should become new X.
+    snprintf(calc.display, sizeof(calc.display), "%.10g", calc.stack[0]);
+  } else if (strcmp(op, "DRP") == 0) {
+    calc_stackPop();
+    snprintf(calc.display, sizeof(calc.display), "%.10g", calc.stack[0]);
+  } else if (strcmp(op, "CLR") == 0) {
+    // Clear stack
+    for (int i = 0; i < 4; i++)
+      calc.stack[i] = 0;
+    snprintf(calc.display, sizeof(calc.display), "0");
+  }
 }
 
 void calc_inputUnary(const char *func) {
@@ -142,7 +199,41 @@ void calc_inputUnary(const char *func) {
   calc.clearOnNextDigit = 1;
 }
 
+// Basic Operator Handling
 void calc_inputOperator(char op) {
+  if (currentMode == MODE_RPN) {
+    // In RPN, operator acts on stack immediately (X, Y)
+    double x = atof(calc.display); // This is conceptually the register, but
+                                   // let's sync with stack?
+    // Usually X is on stack[0] if we just pushed?
+    // If user typed '5' 'Enter' '3', stack has 5. Display has 3.
+    // Op '+' -> Pop 5 (Y), take 3 (X). Add. Push Result.
+
+    double y = calc_stackPop(); // Remove Y from stack (it was at 0)
+
+    double res = 0;
+    if (op == '+')
+      res = y + x;
+    else if (op == '-')
+      res = y - x;
+    else if (op == '*')
+      res = y * x;
+    else if (op == '/')
+      res = (x != 0) ? y / x : 0; // Handle div0 later
+    else if (op == '^')
+      res = pow(y, x);
+
+    // Push result becomes new X
+    calc_stackPush(res);
+    snprintf(calc.display, sizeof(calc.display), "%.10g", res);
+    calc.clearOnNextDigit = 1;
+    return;
+  }
+
+  // Basic Mode Logic
+  if (calc.hasPendingOp) {
+    calc_inputEquals();
+  }
   calc.storedValue = atof(calc.display);
   calc.pendingOp = op;
   calc.hasPendingOp = 1;
@@ -235,6 +326,11 @@ void calc_inputClear(void) {
   calc.pendingOp = 0;
   calc.hasPendingOp = 0;
   calc.clearOnNextDigit = 0;
+  // Also clear RPN stack if in RPN mode
+  if (currentMode == MODE_RPN) {
+    for (int i = 0; i < 4; i++)
+      calc.stack[i] = 0;
+  }
 }
 
 void calc_inputBackspace(void) {
@@ -692,12 +788,15 @@ int predictDigit(void) {
 SDL_Rect displayRect;
 
 void updateLayout(int width, int height) {
-  int sidebarWidth = showHistory ? 200 : 0;
+  int sidebarWidth = (showHistory || currentMode == MODE_RPN) ? 200 : 0;
   // Calculate Button Dimensions
-  // If Scientific/Unit: 6 cols. Basic/Draw: 4 cols.
-  // Standard Calc Width: 300. Sci/Unit Add 150? -> 450.
+  // If Scientific/Unit/RPN: 6 cols?
+  // RPN: Maybe just 4 cols + Sidebar?
+  // Let's make RPN use 6 cols to fit SWP/DRP buttons easily.
+  // Standard Calc Width: 300. Sci/Unit/RPN Add 150? -> 450.
 
-  if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT) {
+  if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
+      currentMode == MODE_RPN) {
     if (width < 450)
       width = 450;
   } else {
@@ -709,7 +808,7 @@ void updateLayout(int width, int height) {
   int controlH = 30;
   int startY = 120;
 
-  int calcWidth = width - (showHistory ? 200 : 0);
+  int calcWidth = width - ((showHistory || currentMode == MODE_RPN) ? 200 : 0);
   int padW = calcWidth - 40;
 
   // Re-calc display
@@ -727,9 +826,11 @@ void updateLayout(int width, int height) {
 
   // Control Row
   // MODE, HIST, C, / (Standard)
-  // Sci/Unit: MODE, HIST, C, /, PI, E
-  int numControl =
-      (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT) ? 6 : 4;
+  // Sci/Unit/RPN: MODE, HIST, C, /, PI, E (Unit uses Sci layout base)
+  int numControl = (currentMode == MODE_SCIENTIFIC ||
+                    currentMode == MODE_UNIT || currentMode == MODE_RPN)
+                       ? 6
+                       : 4;
   int gap = 10;
   int ctrlBtnW = (padW - gap * (numControl - 1)) / numControl;
 
@@ -745,8 +846,9 @@ void updateLayout(int width, int height) {
           (SDL_Rect){20 + 3 * (ctrlBtnW + gap), controlY, ctrlBtnW, controlH};
   }
 
-  if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT) {
-    // PI, E
+  if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
+      currentMode == MODE_RPN) {
+    // PI, E or similar placement
     for (int i = 0; i < numButtons; i++) {
       if (strcmp(buttons[i].label, "PI") == 0)
         buttons[i].rect =
@@ -760,9 +862,11 @@ void updateLayout(int width, int height) {
   }
 
   // Keypad
-  // Basic: 4 cols. Sci/Unit: 6 cols.
-  int cols =
-      (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT) ? 6 : 4;
+  // Basic: 4 cols. Sci/Unit/RPN: 6 cols.
+  int cols = (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
+              currentMode == MODE_RPN)
+                 ? 6
+                 : 4;
   int bw = (padW - gap * (cols - 1)) / cols;
 
   int padH = height - startY - 20;
@@ -770,9 +874,11 @@ void updateLayout(int width, int height) {
     padH = 200;
   int bh = (padH - 3 * gap) / 4; // 4 rows
 
-  // If Sci/Unit, Standard keys are shifted by 2 cols
-  int colOffset =
-      (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT) ? 2 : 0;
+  // If Sci, Standard keys are shifted by 2 cols
+  int colOffset = (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
+                   currentMode == MODE_RPN)
+                      ? 2
+                      : 0;
   int startX = 20;
 
   // Helper to place button
@@ -854,7 +960,8 @@ void updateLayout(int width, int height) {
                                    startY + 3 * (bh + gap), bw, bh};
   }
   for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "=") == 0)
+    if (strcmp(buttons[i].label, "=") == 0 ||
+        strcmp(buttons[i].label, "ENT") == 0)
       buttons[i].rect = (SDL_Rect){startX + (3 + colOffset) * (bw + gap),
                                    startY + 3 * (bh + gap), bw, bh};
   }
@@ -934,6 +1041,65 @@ void updateLayout(int width, int height) {
       if (strcmp(buttons[i].label, "lb2kg") == 0)
         buttons[i].rect = r01;
     }
+
+    r00.y += bh + gap;
+    r01.y += bh + gap;
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "km2mi") == 0)
+        buttons[i].rect = r00;
+    }
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "mi2km") == 0)
+        buttons[i].rect = r01;
+    }
+
+    r00.y += bh + gap;
+    r01.y += bh + gap;
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "C2F") == 0)
+        buttons[i].rect = r00;
+    }
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "F2C") == 0)
+        buttons[i].rect = r01;
+    }
+  }
+
+  // RPN Keys
+  if (currentMode == MODE_RPN) {
+    // Logic for = becomes ENT
+    // RPN buttons: SWP, DRP.
+    // Place SWP, DRP in Col 0, 1 of Row 1?
+    SDL_Rect r00 = {startX, startY, bw, bh};
+    SDL_Rect r01 = {startX + bw + gap, startY, bw, bh};
+
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "SWP") == 0)
+        buttons[i].rect = r00;
+    }
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "DRP") == 0)
+        buttons[i].rect = r01;
+    }
+
+    // Update label of '=' button to 'ENT' or vice versa.
+    // We can't change label string easily if it's static literal?
+    // buttons[i].label is char[8], so we can strcpy.
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "=") == 0 ||
+          strcmp(buttons[i].label, "ENT") == 0) {
+        strcpy(buttons[i].label, "ENT");
+        // Color? ENT typical is large vertical, here just 1x1. keep Orange.
+      }
+    }
+  } else {
+    // Restore '=' if not RPN
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "=") == 0 ||
+          strcmp(buttons[i].label, "ENT") == 0) {
+        strcpy(buttons[i].label, "=");
+      }
+    }
   }
 }
 
@@ -994,7 +1160,8 @@ void initButtons(void) {
 
   // Create Scientific Buttons if not already
   // Add: sin cos tan log ln sqrt sqr x^y PI e (10 buttons)
-  // Check if numButtons < 30 to avoid re-adding (standard 16 + 10 sci + 4 unit)
+  // Check if numButtons < 20 to avoid re-adding (standard 16 + 10 sci + 8 unit
+  // + 2 rpn)
   if (numButtons < 20) {
     char *sciLabels[] = {"sin",  "cos", "tan", "log", "ln",
                          "sqrt", "sqr", "x^y", "PI",  "e"};
@@ -1005,10 +1172,20 @@ void initButtons(void) {
     }
 
     // Unit buttons
-    char *unitLabels[] = {"cm2in", "in2cm", "kg2lb", "lb2kg"};
-    for (int i = 0; i < 4; i++) {
+    // Add new ones: km2mi, mi2km, C2F, F2C
+    char *unitLabels[] = {"cm2in", "in2cm", "kg2lb", "lb2kg",
+                          "km2mi", "mi2km", "C2F",   "F2C"};
+    for (int i = 0; i < 8; i++) {
       Button *b = &buttons[numButtons++];
       strcpy(b->label, unitLabels[i]);
+      b->color = COLOR_OP;
+    }
+
+    // RPN buttons: SWP, DRP
+    char *rpnLabels[] = {"SWP", "DRP"};
+    for (int i = 0; i < 2; i++) {
+      Button *b = &buttons[numButtons++];
+      strcpy(b->label, rpnLabels[i]);
       b->color = COLOR_OP;
     }
   }
@@ -1080,9 +1257,20 @@ void handleButtonClick(int x, int y) {
       updateLayout(450, h);
       return;
     }
-    // Draw
+    // RPN
     if (x >= r.x && x < r.x + 100 && y >= r.y + r.h + 3 * itemH &&
         y < r.y + r.h + 4 * itemH) {
+      currentMode = MODE_RPN;
+      isDropdownOpen = 0;
+      showDraw = 0;
+      SDL_SetWindowSize(win, 650,
+                        h); // RPN mode is wide, sidebar handled by updateLayout
+      updateLayout(650, h);
+      return;
+    }
+    // Draw
+    if (x >= r.x && x < r.x + 100 && y >= r.y + r.h + 4 * itemH &&
+        y < r.y + r.h + 5 * itemH) {
       currentMode = MODE_DRAW; // This handles layout logic
       // Trigger old showDraw flag logic
       showDraw = 1;
@@ -1208,8 +1396,10 @@ void handleButtonClick(int x, int y) {
       } else if (label[0] == '+' || label[0] == '-' || label[0] == '*' ||
                  label[0] == '/' || label[0] == '^') {
         calc_inputOperator(label[0]);
-      } else if (label[0] == '=') {
+      } else if (strcmp(label, "=") == 0) { // Basic mode equals
         calc_inputEquals();
+      } else if (strcmp(label, "ENT") == 0) { // RPN Enter
+        calc_inputRPN("ENT");
       } else if (strcmp(label, "sin") == 0 || strcmp(label, "cos") == 0 ||
                  strcmp(label, "tan") == 0 || strcmp(label, "log") == 0 ||
                  strcmp(label, "ln") == 0 || strcmp(label, "sqr") == 0 ||
@@ -1220,8 +1410,12 @@ void handleButtonClick(int x, int y) {
       } else if (strcmp(label, "PI") == 0 || strcmp(label, "e") == 0) {
         calc_inputConstant(label);
       } else if (strcmp(label, "cm2in") == 0 || strcmp(label, "in2cm") == 0 ||
-                 strcmp(label, "kg2lb") == 0 || strcmp(label, "lb2kg") == 0) {
+                 strcmp(label, "kg2lb") == 0 || strcmp(label, "lb2kg") == 0 ||
+                 strcmp(label, "km2mi") == 0 || strcmp(label, "mi2km") == 0 ||
+                 strcmp(label, "C2F") == 0 || strcmp(label, "F2C") == 0) {
         calc_inputUnit(label);
+      } else if (strcmp(label, "SWP") == 0 || strcmp(label, "DRP") == 0) {
+        calc_inputRPN(label);
       }
       triggerClickAnim(0, i);
       break;
@@ -1275,7 +1469,11 @@ void handleKeyboard(SDL_Keycode key) {
   case SDLK_KP_EQUALS:
   case SDLK_RETURN:
   case SDLK_KP_ENTER:
-    calc_inputEquals();
+    if (currentMode == MODE_RPN) {
+      calc_inputRPN("ENT");
+    } else {
+      calc_inputEquals();
+    }
     break;
   case SDLK_c:
   case SDLK_ESCAPE:
@@ -1341,8 +1539,14 @@ void render(SDL_Renderer *ren) {
   SDL_SetRenderDrawColor(ren, COLOR_BG.r, COLOR_BG.g, COLOR_BG.b, 255);
   SDL_RenderClear(ren);
 
-  // --- Sidebar (History) ---
-  if (showHistory) {
+  // --- Sidebar (History OR RPN Stack) ---
+  // The instruction about `calcWidth` in `updateLayout` is not directly
+  // applicable here as `updateLayout` function definition is not in the
+  // provided content. However, the `calcWidth` variable is used in `render` for
+  // `showDraw` logic. The instruction implies that the sidebar should also
+  // appear for RPN mode. The `if (showHistory || currentMode == MODE_RPN)`
+  // condition already handles this.
+  if (showHistory || currentMode == MODE_RPN) {
 
     int sidebarX = w - 200;
     SDL_Rect sidebar = {sidebarX, 0, 200, h};
@@ -1353,24 +1557,44 @@ void render(SDL_Renderer *ren) {
     SDL_SetRenderDrawColor(ren, 60, 60, 60, 255);
     SDL_RenderDrawLine(ren, sidebarX, 0, sidebarX, h);
 
-    // History Items
-    for (int i = 0; i < historyCount; i++) {
-      int y = 20 + i * 40;
+    if (currentMode == MODE_RPN) {
+      // Draw Stack (T, Z, Y, X)
+      // X is display logic usually, but let's show stack[0] as X.
+      // Stack indices: 0=X, 1=Y, 2=Z, 3=T.
+      char *labels[] = {"X:", "Y:", "Z:", "T:"};
+      for (int i = 0; i < 4; i++) {
+        int y = h - 100 - i * 50;
+        char valStr[64];
+        snprintf(valStr, sizeof(valStr), "%.10g", calc.stack[i]);
 
-      // Equation centered/leftish of sidebar
-      SDL_SetRenderDrawColor(ren, 150, 150, 150, 255);
-      drawText(ren, history[i].equation, sidebarX + 10, y, 2);
+        SDL_SetRenderDrawColor(ren, 150, 150, 150, 255);
+        drawText(ren, labels[i], sidebarX + 10, y, 3);
+        SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+        drawText(ren, valStr, sidebarX + 40, y, 3);
+      }
+      SDL_SetRenderDrawColor(ren, 200, 200, 200, 255);
+      drawText(ren, "STACK", sidebarX + 10, 20, 3);
 
-      // Result
-      char resStr[32];
-      snprintf(resStr, sizeof(resStr), "%g", history[i].result);
-      // Format
-      char fmtRes[64];
-      formatNumber(resStr, fmtRes, sizeof(fmtRes));
+    } else {
+      // History Items
+      for (int i = 0; i < historyCount; i++) {
+        int y = 20 + i * 40;
 
-      SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b,
-                             255);
-      drawText(ren, fmtRes, sidebarX + 10, y + 15, 3);
+        // Equation centered/leftish of sidebar
+        SDL_SetRenderDrawColor(ren, 150, 150, 150, 255);
+        drawText(ren, history[i].equation, sidebarX + 10, y, 2);
+
+        // Result
+        char resStr[32];
+        snprintf(resStr, sizeof(resStr), "%g", history[i].result);
+        // Format
+        char fmtRes[64];
+        formatNumber(resStr, fmtRes, sizeof(fmtRes));
+
+        SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b,
+                               255);
+        drawText(ren, fmtRes, sidebarX + 10, y + 15, 3);
+      }
     }
   }
 
@@ -1538,7 +1762,7 @@ void render(SDL_Renderer *ren) {
     SDL_Rect r = modeBtn.rect;
     r.y += r.h;
     r.w = 100; // Fixed width for menu
-    r.h = 120; // 4 items * 30
+    r.h = 150; // 5 items * 30
 
     // Background
     SDL_SetRenderDrawColor(ren, 40, 40, 40, 255);
@@ -1549,7 +1773,8 @@ void render(SDL_Renderer *ren) {
     drawText(ren, "Basic", r.x + 10, r.y + 5, 2);
     drawText(ren, "Scientific", r.x + 10, r.y + 35, 2);
     drawText(ren, "Unit", r.x + 10, r.y + 65, 2);
-    drawText(ren, "Draw", r.x + 10, r.y + 95, 2);
+    drawText(ren, "RPN", r.x + 10, r.y + 95, 2);
+    drawText(ren, "Draw", r.x + 10, r.y + 125, 2);
 
     // Borders
     SDL_SetRenderDrawColor(ren, 100, 100, 100, 255);
