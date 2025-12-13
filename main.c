@@ -92,29 +92,80 @@ void calc_inputBackspace(void) {
   }
 }
 
-// Simple text rendering using SDL rectangles (no SDL_ttf dependency)
-void drawDigit(SDL_Renderer *ren, int digit, int x, int y, int scale) {
-  // 3x5 pixel font patterns for 0-9, +, -, *, /, =, C
-  static const unsigned char patterns[16][5] = {
-      {0b111, 0b101, 0b101, 0b101, 0b111}, // 0
-      {0b010, 0b110, 0b010, 0b010, 0b111}, // 1
-      {0b111, 0b001, 0b111, 0b100, 0b111}, // 2
-      {0b111, 0b001, 0b111, 0b001, 0b111}, // 3
-      {0b101, 0b101, 0b111, 0b001, 0b001}, // 4
-      {0b111, 0b100, 0b111, 0b001, 0b111}, // 5
-      {0b111, 0b100, 0b111, 0b101, 0b111}, // 6
-      {0b111, 0b001, 0b001, 0b001, 0b001}, // 7
-      {0b111, 0b101, 0b111, 0b101, 0b111}, // 8
-      {0b111, 0b101, 0b111, 0b001, 0b111}, // 9
-      {0b010, 0b010, 0b111, 0b010, 0b010}, // + (10)
-      {0b000, 0b000, 0b111, 0b000, 0b000}, // - (11)
-      {0b101, 0b010, 0b101, 0b010, 0b101}, // * (12)
-      {0b001, 0b001, 0b010, 0b100, 0b100}, // / (13)
-      {0b000, 0b111, 0b000, 0b111, 0b000}, // = (14)
-      {0b111, 0b100, 0b100, 0b100, 0b111}, // C (15)
-  };
+// Helper to format number with commas
+void formatNumber(const char *src, char *dest, size_t destSize) {
+  // Find decimal point
+  const char *dot = strchr(src, '.');
+  int integerLen = dot ? (int)(dot - src) : (int)strlen(src);
+  int isNegative = (src[0] == '-');
 
-  if (digit < 0 || digit > 15)
+  int srcIdx = integerLen - 1;
+  int destIdx = 0;
+  int digitCount = 0;
+
+  // Space for null terminator
+  char temp[64];
+  int tempIdx = 0;
+
+  // Handle fractional part
+  if (dot) {
+    const char *frac = dot;
+    while (*frac && tempIdx < 60) {
+      temp[tempIdx++] = *frac;
+      frac++;
+    }
+  }
+
+  // Handle integer part in reverse
+  while (srcIdx >= (isNegative ? 1 : 0)) {
+    if (digitCount > 0 && digitCount % 3 == 0) {
+      temp[tempIdx++] = ',';
+    }
+    temp[tempIdx++] = src[srcIdx--];
+    digitCount++;
+  }
+
+  if (isNegative) {
+    temp[tempIdx++] = '-';
+  }
+
+  // Reverse temp into dest
+  int i;
+  for (i = 0; i < tempIdx && i < destSize - 1; i++) {
+    dest[i] = temp[tempIdx - 1 - i];
+  }
+  dest[i] = '\0';
+}
+
+// 3x5 pixel font patterns
+// 0-9, +, -, *, /, =, C, O, V, R, F, L, W
+static const unsigned char patterns[22][5] = {
+    {0b111, 0b101, 0b101, 0b101, 0b111}, // 0
+    {0b010, 0b110, 0b010, 0b010, 0b111}, // 1
+    {0b111, 0b001, 0b111, 0b100, 0b111}, // 2
+    {0b111, 0b001, 0b111, 0b001, 0b111}, // 3
+    {0b101, 0b101, 0b111, 0b001, 0b001}, // 4
+    {0b111, 0b100, 0b111, 0b001, 0b111}, // 5
+    {0b111, 0b100, 0b111, 0b101, 0b111}, // 6
+    {0b111, 0b001, 0b001, 0b001, 0b001}, // 7
+    {0b111, 0b101, 0b111, 0b101, 0b111}, // 8
+    {0b111, 0b101, 0b111, 0b001, 0b111}, // 9
+    {0b010, 0b010, 0b111, 0b010, 0b010}, // + (10)
+    {0b000, 0b000, 0b111, 0b000, 0b000}, // - (11)
+    {0b101, 0b010, 0b101, 0b010, 0b101}, // * (12)
+    {0b001, 0b001, 0b010, 0b100, 0b100}, // / (13)
+    {0b000, 0b111, 0b000, 0b111, 0b000}, // = (14)
+    {0b111, 0b100, 0b100, 0b100, 0b111}, // C (15)
+    {0b111, 0b101, 0b101, 0b101, 0b111}, // O (16)
+    {0b101, 0b101, 0b101, 0b101, 0b010}, // V (17)
+    {0b110, 0b101, 0b110, 0b101, 0b101}, // R (18)
+    {0b111, 0b100, 0b110, 0b100, 0b100}, // F (19)
+    {0b100, 0b100, 0b100, 0b100, 0b111}, // L (20)
+    {0b101, 0b101, 0b101, 0b111, 0b101}, // W (21)
+};
+
+void drawDigit(SDL_Renderer *ren, int digit, int x, int y, int scale) {
+  if (digit < 0 || digit > 21)
     return;
 
   for (int row = 0; row < 5; row++) {
@@ -143,8 +194,22 @@ int charToPattern(char c) {
     return 14;
   case 'C':
     return 15;
+  case 'O':
+    return 16;
+  case 'V':
+    return 17;
+  case 'R':
+    return 18;
+  case 'F':
+    return 19;
+  case 'L':
+    return 20;
+  case 'W':
+    return 21;
   case '.':
     return -2; // special handling
+  case ',':
+    return -3; // comma handling
   }
   return -1;
 }
@@ -161,6 +226,15 @@ void drawText(SDL_Renderer *ren, const char *text, int x, int y, int scale) {
       SDL_Rect r = {x + i * charWidth + scale, y + 4 * scale, scale - 1,
                     scale - 1};
       SDL_RenderFillRect(ren, &r);
+    } else if (text[i] == ',') {
+      // Draw comma (small vertical stroke at bottom)
+      SDL_Rect r1 = {x + i * charWidth + scale, y + 4 * scale, scale - 1,
+                     scale - 1};
+      SDL_RenderFillRect(ren, &r1);
+      // Tail
+      SDL_Rect r2 = {x + i * charWidth + scale - 1, y + 5 * scale, scale / 2,
+                     scale / 2};
+      SDL_RenderFillRect(ren, &r2);
     }
   }
 }
@@ -291,13 +365,31 @@ void render(SDL_Renderer *ren) {
                          255);
   SDL_RenderFillRect(ren, &displayRect);
 
-  // Display text (right-aligned)
-  SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b, 255);
-  int textLen = strlen(calc.display);
+  // Format the number
+  char formattedText[64];
+  formatNumber(calc.display, formattedText, sizeof(formattedText));
+
+  // Check for overflow (max width)
   int scale = 4;
   int charWidth = 4 * scale;
-  int textX = displayRect.x + displayRect.w - textLen * charWidth - 10;
-  drawText(ren, calc.display, textX, displayRect.y + 15, scale);
+  int maxDisplayWidth = displayRect.w - 20;
+
+  int textWidth = strlen(formattedText) * charWidth;
+  const char *finalText = formattedText;
+
+  if (textWidth > maxDisplayWidth) {
+    finalText = "OVRFLOW";
+    textWidth = strlen(finalText) * charWidth;
+  }
+
+  // Display text (right-aligned)
+  SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b, 255);
+
+  // Calculate X position
+  int textX = displayRect.x + displayRect.w - textWidth - 10;
+
+  // Draw
+  drawText(ren, finalText, textX, displayRect.y + 15, scale);
 
   // Buttons
   for (int i = 0; i < numButtons; i++) {
