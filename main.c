@@ -15,7 +15,7 @@ typedef struct {
 // Button definition
 typedef struct {
   SDL_Rect rect;
-  char label[4];
+  char label[8];
   SDL_Color color;
 } Button;
 
@@ -48,6 +48,39 @@ void calc_inputOperator(char op) {
   strcpy(calc.display, "0");
 }
 
+// History
+typedef struct {
+  char equation[64];
+  double result;
+} HistoryEntry;
+
+HistoryEntry history[8];
+int historyCount = 0;
+
+void addToHistory(const char *opA, char op, const char *opB, double result) {
+  // Shift if full
+  if (historyCount == 8) {
+    for (int i = 0; i < 7; i++) {
+      history[i] = history[i + 1];
+    }
+    historyCount = 7;
+  }
+
+  // Add new
+  HistoryEntry *entry = &history[historyCount++];
+  snprintf(entry->equation, sizeof(entry->equation), "%s %c %s =", opA, op,
+           opB);
+  entry->result = result;
+}
+
+void loadHistory(int index) {
+  if (index >= 0 && index < historyCount) {
+    snprintf(calc.display, sizeof(calc.display), "%g", history[index].result);
+    calc.storedValue = 0;
+    calc.hasPendingOp = 0;
+    calc.clearOnNextDigit = 1;
+  }
+}
 void calc_inputEquals(void) {
   if (!calc.hasPendingOp)
     return;
@@ -69,6 +102,11 @@ void calc_inputEquals(void) {
     result = (current == 0) ? 0 : calc.storedValue / current;
     break;
   }
+
+  // Add to history
+  char opA[32];
+  snprintf(opA, sizeof(opA), "%g", calc.storedValue);
+  addToHistory(opA, calc.pendingOp, calc.display, result);
 
   snprintf(calc.display, sizeof(calc.display), "%g", result);
   calc.hasPendingOp = 0;
@@ -137,9 +175,8 @@ void formatNumber(const char *src, char *dest, size_t destSize) {
   dest[i] = '\0';
 }
 
-// 3x5 pixel font patterns
-// 0-9, +, -, *, /, =, C, O, V, R, F, L, W
-static const unsigned char patterns[22][5] = {
+// 0-9, +, -, *, /, =, C, O, V, R, F, L, W, H, I, S, T
+static const unsigned char patterns[26][5] = {
     {0b111, 0b101, 0b101, 0b101, 0b111}, // 0
     {0b010, 0b110, 0b010, 0b010, 0b111}, // 1
     {0b111, 0b001, 0b111, 0b100, 0b111}, // 2
@@ -162,10 +199,14 @@ static const unsigned char patterns[22][5] = {
     {0b111, 0b100, 0b110, 0b100, 0b100}, // F (19)
     {0b100, 0b100, 0b100, 0b100, 0b111}, // L (20)
     {0b101, 0b101, 0b101, 0b111, 0b101}, // W (21)
+    {0b101, 0b101, 0b111, 0b101, 0b101}, // H (22)
+    {0b111, 0b010, 0b010, 0b010, 0b111}, // I (23)
+    {0b111, 0b100, 0b111, 0b001, 0b111}, // S (24)
+    {0b111, 0b010, 0b010, 0b010, 0b010}, // T (25)
 };
 
 void drawDigit(SDL_Renderer *ren, int digit, int x, int y, int scale) {
-  if (digit < 0 || digit > 21)
+  if (digit < 0 || digit > 25)
     return;
 
   for (int row = 0; row < 5; row++) {
@@ -197,7 +238,6 @@ int charToPattern(char c) {
   case 'O':
     return 16;
   case 'V':
-    return 17;
   case 'R':
     return 18;
   case 'F':
@@ -206,6 +246,14 @@ int charToPattern(char c) {
     return 20;
   case 'W':
     return 21;
+  case 'H':
+    return 22;
+  case 'I':
+    return 23;
+  case 'S':
+    return 24;
+  case 'T':
+    return 25;
   case '.':
     return -2; // special handling
   case ',':
@@ -239,9 +287,13 @@ void drawText(SDL_Renderer *ren, const char *text, int x, int y, int scale) {
   }
 }
 
+// Global variables for history toggle
+int showHistory = 0;
+Button histBtn;
+
 void initButtons(void) {
   int bw = 60, bh = 50, gap = 10;
-  int startX = 20, startY = 90;
+  int startX = 20, startY = 120; // Moved down from 90
 
   // Digit buttons 1-9
   int nums[3][3] = {{7, 8, 9}, {4, 5, 6}, {1, 2, 3}};
@@ -283,9 +335,38 @@ void initButtons(void) {
     snprintf(bop->label, sizeof(bop->label), "%c", ops[i]);
     bop->color = COLOR_OP;
   }
+
+  // History Toggle Button
+  histBtn.rect = (SDL_Rect){20, 80, 60, 30}; // Left-aligned
+  strcpy(histBtn.label, "HIST");
+  histBtn.color = COLOR_OP;
 }
 
-void handleButtonClick(int x, int y) {
+// Global window pointer for resizing
+static SDL_Window *gWindow = NULL;
+
+void handleButtonClick(int x, int y){
+  SDL_Window *win = gWindow;
+  //History button
+  if (x >= histBtn.rect.x && x < histBtn.rect.x + histBtn.rect.w && y >= histBtn.rect.y && y < histBtn.rect.h){
+    showHistory = !showHistory;
+    SDL_SetWindowSize(win, showHistory ? 500 : 300, 390);
+    return;
+  }
+
+  //History sidebar
+  if (showHistory && x > 300){
+    int startY = 20;
+    int itemH = 40;
+    int index = (y = startY)/ itemH;
+    if(index >= 0 && index < historyCount){
+      loadHistory(index);
+      return;
+    }
+  }
+
+
+  // Calculator buttons
   for (int i = 0; i < numButtons; i++) {
     SDL_Rect *r = &buttons[i].rect;
     if (x >= r->x && x < r->x + r->w && y >= r->y && y < r->y + r->h) {
@@ -359,6 +440,39 @@ void render(SDL_Renderer *ren) {
   SDL_SetRenderDrawColor(ren, COLOR_BG.r, COLOR_BG.g, COLOR_BG.b, 255);
   SDL_RenderClear(ren);
 
+  // --- Sidebar (History) ---
+  if (showHistory) {
+    SDL_Rect sidebar = {300, 0, 200, 390}; // Height 390
+    SDL_SetRenderDrawColor(ren, 40, 40, 40, 255);
+    SDL_RenderFillRect(ren, &sidebar);
+
+    // Separator line
+    SDL_SetRenderDrawColor(ren, 60, 60, 60, 255);
+    SDL_RenderDrawLine(ren, 300, 0, 300, 390); // Height 390
+
+    // History Itemsss
+    for (int i = 0; i < historyCount; i++) {
+      int y = 20 + i * 40;
+
+      // Equation centered/leftish
+      SDL_SetRenderDrawColor(ren, 150, 150, 150, 255);
+      drawText(ren, history[i].equation, 310, y, 2);
+
+      // Result
+      char resStr[32];
+      snprintf(resStr, sizeof(resStr), "%g", history[i].result);
+      // Format if possible?
+      char fmtRes[64];
+      formatNumber(resStr, fmtRes, sizeof(fmtRes));
+
+      SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b,
+                             255);
+      drawText(ren, fmtRes, 310, y + 15, 3);
+    }
+  }
+
+  // --- Calculator ---
+
   // Display background
   SDL_Rect displayRect = {20, 20, 260, 50};
   SDL_SetRenderDrawColor(ren, COLOR_DISPLAY.r, COLOR_DISPLAY.g, COLOR_DISPLAY.b,
@@ -391,6 +505,16 @@ void render(SDL_Renderer *ren) {
   // Draw
   drawText(ren, finalText, textX, displayRect.y + 15, scale);
 
+  // Draw HIST button
+  SDL_SetRenderDrawColor(ren, histBtn.color.r, histBtn.color.g, histBtn.color.b,
+                         255);
+  SDL_RenderFillRect(ren, &histBtn.rect);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  // Center Label "HIST" (4 chars * 4px width * 2 scale = 32px wide; 5px height
+  // * 2 scale = 10px high) Button 60x30. x = start + (60 - 32)/2 = start + 14
+  // y = start + (30 - 10)/2 = start + 10
+  drawText(ren, "HIST", histBtn.rect.x + 14, histBtn.rect.y + 10, 2);
+
   // Buttons
   for (int i = 0; i < numButtons; i++) {
     Button *b = &buttons[i];
@@ -416,9 +540,19 @@ int main(int argc, char *argv[]) {
 
   SDL_Init(SDL_INIT_VIDEO);
 
-  SDL_Window *win = SDL_CreateWindow("jai's calculator", SDL_WINDOWPOS_CENTERED,
-                                     SDL_WINDOWPOS_CENTERED, 300, 350, 0);
+  SDL_Window *win =
+      SDL_CreateWindow("jai's calculator", SDL_WINDOWPOS_CENTERED,
+                       SDL_WINDOWPOS_CENTERED, 300, 390, SDL_WINDOW_RESIZABLE);
+  // Initial height 390
   SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+
+  // Keep a reference to resizing isn't fully automatic via SDL_SetWindowSize on
+  // some platforms without flags but we'll see. Actually we need to handle the
+  // window handle in handleButtonClick properly. SDL_GL_GetCurrentWindow might
+  // not work if we didn't create a GL context explicitly? SDL_SetWindowSize
+  // needs the window pointer. We can pass 'win' to handleButtonClick or make
+  // 'win' global. For simplicity, let's make 'win' global in this small app.
+  gWindow = win;
 
   initButtons();
 
@@ -430,6 +564,8 @@ int main(int argc, char *argv[]) {
       if (e.type == SDL_QUIT) {
         quit = 1;
       } else if (e.type == SDL_MOUSEBUTTONDOWN) {
+        // We need the window to resize it.
+        // Let's hack it: define a global `gWindow` and set it in main.
         handleButtonClick(e.button.x, e.button.y);
       } else if (e.type == SDL_KEYDOWN) {
         handleKeyboard(e.key.keysym.sym);
