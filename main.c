@@ -1,3 +1,4 @@
+#include "model.h"
 #include <SDL2/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,8 +176,8 @@ void formatNumber(const char *src, char *dest, size_t destSize) {
   dest[i] = '\0';
 }
 
-// 0-9, +, -, *, /, =, C, O, V, R, F, L, W, H, I, S, T
-static const unsigned char patterns[26][5] = {
+// 0-9, +, -, *, /, =, C, O, V, R, F, L, W, H, I, S, T, A, D, U, E
+static const unsigned char patterns[30][5] = {
     {0b111, 0b101, 0b101, 0b101, 0b111}, // 0
     {0b010, 0b110, 0b010, 0b010, 0b111}, // 1
     {0b111, 0b001, 0b111, 0b100, 0b111}, // 2
@@ -203,10 +204,14 @@ static const unsigned char patterns[26][5] = {
     {0b111, 0b010, 0b010, 0b010, 0b111}, // I (23)
     {0b111, 0b100, 0b111, 0b001, 0b111}, // S (24)
     {0b111, 0b010, 0b010, 0b010, 0b010}, // T (25)
+    {0b111, 0b101, 0b111, 0b101, 0b101}, // A (26)
+    {0b110, 0b101, 0b101, 0b101, 0b110}, // D (27)
+    {0b101, 0b101, 0b101, 0b101, 0b111}, // U (28)
+    {0b111, 0b100, 0b111, 0b100, 0b111}, // E (29)
 };
 
 void drawDigit(SDL_Renderer *ren, int digit, int x, int y, int scale) {
-  if (digit < 0 || digit > 25)
+  if (digit < 0 || digit > 29)
     return;
 
   for (int row = 0; row < 5; row++) {
@@ -254,6 +259,14 @@ int charToPattern(char c) {
     return 24;
   case 'T':
     return 25;
+  case 'A':
+    return 26;
+  case 'D':
+    return 27;
+  case 'U':
+    return 28;
+  case 'E':
+    return 29;
   case '.':
     return -2; // special handling
   case ',':
@@ -291,40 +304,139 @@ void drawText(SDL_Renderer *ren, const char *text, int x, int y, int scale) {
 int showHistory = 0;
 Button histBtn;
 
+// Global variables for draw mode
+int showDraw = 0;
+Button drawBtn;
+unsigned char drawGrid[28][28] = {0}; // 28x28 grid, 0=off, 1=on
+int isDrawing = 0; // Track if mouse is being dragged for drawing
+
+// ML prediction state
+NeuralNetwork nn;
+int modelLoaded = 0;
+int predictedDigit = -1; // -1 means no prediction yet
+
+// Auto-recognition state
+Uint32 lastDrawTime = 0;       // Timestamp of last drawing action
+int hasDrawnSomething = 0;     // Flag if grid has any pixels
+#define AUTO_PREDICT_DELAY 800 // ms to wait before auto-predicting
+
+// ML prediction using Neural Network
+int predictDigit(void) {
+  if (!modelLoaded) {
+    printf("Model not loaded, cannot predict.\n");
+    return -1;
+  }
+
+  // 1. Find bounding box of the drawn digit
+  int minR = 28, maxR = -1;
+  int minC = 28, maxC = -1;
+
+  for (int r = 0; r < 28; r++) {
+    for (int c = 0; c < 28; c++) {
+      if (drawGrid[r][c]) {
+        if (r < minR)
+          minR = r;
+        if (r > maxR)
+          maxR = r;
+        if (c < minC)
+          minC = c;
+        if (c > maxC)
+          maxC = c;
+      }
+    }
+  }
+
+  // Handle empty grid
+  if (maxR == -1)
+    return -1;
+
+  // 2. Extract and Resize to 20x20 (fitting largest dimension)
+  // MNIST digits are normalized to fit in 20x20 box while preserving aspect
+  // ratio
+  float processed[28][28] = {0};
+
+  int w = maxC - minC + 1;
+  int h = maxR - minR + 1;
+
+  // Scale factor to fit into 20x20
+  float scale = 20.0f / (w > h ? w : h);
+
+  // Center position in 28x28 target (offset by 4 for padding + centering
+  // deviation)
+  int targetCx = 14;
+  int targetCy = 14;
+
+  // Convert drawn grid pixels to centered 28x28 input
+  for (int r = 0; r < 28; r++) {
+    for (int c = 0; c < 28; c++) {
+      // Inverse mapping: for target pixel (r,c), where does it come from in
+      // source?
+
+      float srcR = (r - targetCy) / scale + (minR + h / 2.0f);
+      float srcC = (c - targetCx) / scale + (minC + w / 2.0f);
+
+      // Nearest Neighbor
+      int r0 = (int)srcR;
+      int c0 = (int)srcC;
+
+      if (r0 >= 0 && r0 < 28 && c0 >= 0 && c0 < 28) {
+        processed[r][c] = drawGrid[r0][c0] ? 1.0f : 0.0f;
+      }
+    }
+  }
+
+  // 3. Center of Mass correction (Optional but standard for MNIST)
+  // Currently we centered the Bounding Box. MNIST uses Center of Mass.
+  // Let's stick to Bounding Box centering first as it's robust for clear
+  // digits.
+
+  // Flatten for model
+  float input[784];
+  for (int i = 0; i < 28; i++) {
+    for (int j = 0; j < 28; j++) {
+      input[i * 28 + j] = processed[i][j];
+    }
+  }
+
+  return model_predict(&nn, input);
+}
+
 SDL_Rect displayRect;
 
-void updateLayout(int width, int height){
+void updateLayout(int width, int height) {
   int sidebarWidth = showHistory ? 200 : 0;
   int calcWidth = width - sidebarWidth;
   if (calcWidth < 200)
     calcWidth = 200;
-  displayRect = (SDL_Rect){20, 20, calcWidth -40, 50};
+  displayRect = (SDL_Rect){20, 20, calcWidth - 40, 50};
 
   histBtn.rect = (SDL_Rect){20, 80, 60, 30};
-  //keypad
+  drawBtn.rect = (SDL_Rect){90, 80, 60, 30};
+  // keypad
   int startY = 120;
-  int padH = height - startY -20;
+  int padH = height - startY - 20;
   if (padH < 200)
     padH = 200;
   int padW = calcWidth - 40;
   int gap = 10;
 
-  int bw = (padW - 3 * gap)/4;
-  int bh = (padH -3 * gap)/4;
+  int bw = (padW - 3 * gap) / 4;
+  int bh = (padH - 3 * gap) / 4;
 
   int btnIdx = 0;
   int startX = 20;
-  //digits 1-9
-  for (int row = 0; row < 3; row++){
-    for (int col = 0; col<3; col++){
-      if(btnIdx < 9){
-        buttons[btnIdx].rect = (SDL_Rect){startX + col* (bw+gap), startY + row*(bh + gap), bw, bh};
+  // digits 1-9
+  for (int row = 0; row < 3; row++) {
+    for (int col = 0; col < 3; col++) {
+      if (btnIdx < 9) {
+        buttons[btnIdx].rect = (SDL_Rect){startX + col * (bw + gap),
+                                          startY + row * (bh + gap), bw, bh};
         btnIdx++;
       }
     }
   }
 
-   // 0
+  // 0
   if (btnIdx < numButtons)
     buttons[btnIdx++].rect =
         (SDL_Rect){startX, startY + 3 * (bh + gap), bw, bh};
@@ -336,9 +448,9 @@ void updateLayout(int width, int height){
   if (btnIdx < numButtons)
     buttons[btnIdx++].rect =
         (SDL_Rect){startX + 2 * (bw + gap), startY + 3 * (bh + gap), bw, bh};
-  //oops
-  for(int i = 0; i<4; i++){
-    if(btnIdx < numButtons){
+  // oops
+  for (int i = 0; i < 4; i++) {
+    if (btnIdx < numButtons) {
       buttons[btnIdx++].rect =
           (SDL_Rect){startX + 3 * (bw + gap), startY + i * (bh + gap), bw, bh};
     }
@@ -387,6 +499,10 @@ void initButtons(void) {
   strcpy(histBtn.label, "HIST");
   histBtn.color = COLOR_OP;
 
+  // Draw Toggle Button
+  strcpy(drawBtn.label, "DRAW");
+  drawBtn.color = (SDL_Color){0, 150, 200, 255}; // Blue color
+
   // Initial layout
   updateLayout(300, 390);
 }
@@ -401,27 +517,73 @@ void handleButtonClick(int x, int y) {
   if (x >= histBtn.rect.x && x < histBtn.rect.x + histBtn.rect.w &&
       y >= histBtn.rect.y && y < histBtn.rect.y + histBtn.rect.h) {
     showHistory = !showHistory;
+    if (showHistory)
+      showDraw = 0; // Close draw panel if opening history
     int w, h;
     SDL_GetWindowSize(win, &w, &h);
-    // Toggle width based on state?
-    // If we are showing history, add 200. If hiding, subtract 200.
-    // Or just enforce min width?
-    // Let's stick to the toggle logic: compact (300) vs expanded (500)
-    // BUT conserve height.
     SDL_SetWindowSize(win, showHistory ? 500 : 300, h);
-    // updateLayout will be called by window event
     return;
   }
 
+  // Draw Button
+  if (x >= drawBtn.rect.x && x < drawBtn.rect.x + drawBtn.rect.w &&
+      y >= drawBtn.rect.y && y < drawBtn.rect.y + drawBtn.rect.h) {
+    showDraw = !showDraw;
+    if (showDraw)
+      showHistory = 0; // Close history panel if opening draw
+    return;
+  }
+
+  // Draw grid click (grid replaces keypad area)
+  if (showDraw) {
+    int w, h;
+    SDL_GetWindowSize(win, &w, &h);
+    int calcWidth = showHistory ? w - 200 : w;
+    int startY = 120;
+    int padH = h - startY - 20;
+    int padW = calcWidth - 40;
+    int cellSize = (padW < padH ? padW : padH) / 28;
+    int gridSize = 28 * cellSize;
+    int gridX = 20 + (padW - gridSize) / 2;
+    int gridY = startY + (padH - gridSize) / 2;
+
+    // Check for CLR button click (below grid)
+    SDL_Rect clearBtn = {gridX + gridSize / 2 - 30, gridY + gridSize + 10, 60,
+                         25};
+    if (x >= clearBtn.x && x < clearBtn.x + clearBtn.w && y >= clearBtn.y &&
+        y < clearBtn.y + clearBtn.h) {
+      for (int r = 0; r < 28; r++) {
+        for (int c = 0; c < 28; c++) {
+          drawGrid[r][c] = 0;
+        }
+      }
+      hasDrawnSomething = 0; // Reset auto-predict state
+      return;
+    }
+
+    if (x >= gridX && x < gridX + gridSize && y >= gridY &&
+        y < gridY + gridSize) {
+      int col = (x - gridX) / cellSize;
+      int row = (y - gridY) / cellSize;
+      if (col >= 0 && col < 28 && row >= 0 && row < 28) {
+        drawGrid[row][col] = 1;        // Set pixel ON (for drag drawing)
+        isDrawing = 1;                 // Start drawing
+        lastDrawTime = SDL_GetTicks(); // Track last draw time
+        hasDrawnSomething = 1;         // Mark that we have content
+      }
+      return;
+    }
+    return; // Don't process keypad clicks when in draw mode
+  }
+
   // History sidebar click
-  if (showHistory) { // Click is outside calculator area (approx)
-    // Better check: x > window_width - 200
+  if (showHistory) {
     int w, h;
     SDL_GetWindowSize(win, &w, &h);
     if (x > w - 200) {
       int startY = 20;
       int itemH = 40;
-      int index = (y - startY) / itemH; // Fixed bug (y = startY)
+      int index = (y - startY) / itemH;
       if (index >= 0 && index < historyCount) {
         loadHistory(index);
       }
@@ -503,7 +665,7 @@ void render(SDL_Renderer *ren) {
   SDL_GetWindowSize(gWindow, &w, &h);
 
   static int lastW = 0, lastH = 0;
-  if (w!= lastW || h != lastH){
+  if (w != lastW || h != lastH) {
     updateLayout(w, h);
     lastW = w;
     lastH = h;
@@ -515,7 +677,7 @@ void render(SDL_Renderer *ren) {
 
   // --- Sidebar (History) ---
   if (showHistory) {
-    // Logic: Sidebar is rightmost 200px
+
     int sidebarX = w - 200;
     SDL_Rect sidebar = {sidebarX, 0, 200, h};
     SDL_SetRenderDrawColor(ren, 40, 40, 40, 255);
@@ -586,20 +748,67 @@ void render(SDL_Renderer *ren) {
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
   drawText(ren, "HIST", histBtn.rect.x + 14, histBtn.rect.y + 10, 2);
 
-  // Buttons
-  for (int i = 0; i < numButtons; i++) {
-    Button *b = &buttons[i];
+  // Draw DRAW button
+  SDL_SetRenderDrawColor(ren, drawBtn.color.r, drawBtn.color.g, drawBtn.color.b,
+                         255);
+  SDL_RenderFillRect(ren, &drawBtn.rect);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  drawText(ren, "DRAW", drawBtn.rect.x + 11, drawBtn.rect.y + 10, 2);
 
-    // Button background
-    SDL_SetRenderDrawColor(ren, b->color.r, b->color.g, b->color.b, 255);
-    SDL_RenderFillRect(ren, &b->rect);
+  // --- Draw Panel (16x16 Grid) replacing keypad ---
+  if (showDraw) {
+    int calcWidth = showHistory ? w - 200 : w;
+    int startY = 120;
+    int padH = h - startY - 20;
+    int padW = calcWidth - 40;
+    int cellSize = (padW < padH ? padW : padH) / 28;
+    int gridSize = 28 * cellSize;
+    int gridX = 20 + (padW - gridSize) / 2;
+    int gridY = startY + (padH - gridSize) / 2;
 
-    // Button label (centered)
-    SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b, 255);
-    int labelLen = strlen(b->label);
-    int lx = b->rect.x + (b->rect.w - labelLen * 12) / 2;
-    int ly = b->rect.y + (b->rect.h - 15) / 2;
-    drawText(ren, b->label, lx, ly, 3);
+    for (int row = 0; row < 28; row++) {
+      for (int col = 0; col < 28; col++) {
+        SDL_Rect cell = {gridX + col * cellSize, gridY + row * cellSize,
+                         cellSize - 1, cellSize - 1};
+        if (drawGrid[row][col]) {
+          SDL_SetRenderDrawColor(ren, 50, 50, 50, 255);
+        } else {
+          SDL_SetRenderDrawColor(ren, 200, 200, 200, 255);
+        }
+        SDL_RenderFillRect(ren, &cell);
+      }
+    }
+
+    // Grid border
+    SDL_SetRenderDrawColor(ren, 100, 100, 100, 255);
+    SDL_Rect gridBorder = {gridX - 1, gridY - 1, gridSize + 1, gridSize + 1};
+    SDL_RenderDrawRect(ren, &gridBorder);
+
+    // Clear button centered below grid
+    SDL_Rect clearBtn = {gridX + gridSize / 2 - 30, gridY + gridSize + 10, 60,
+                         25};
+    SDL_SetRenderDrawColor(ren, 165, 165, 165, 255);
+    SDL_RenderFillRect(ren, &clearBtn);
+    SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+    drawText(ren, "CLR", clearBtn.x + 16, clearBtn.y + 8, 2);
+
+  } else {
+    // Buttons (only show when not in draw mode)
+    for (int i = 0; i < numButtons; i++) {
+      Button *b = &buttons[i];
+
+      // Button background
+      SDL_SetRenderDrawColor(ren, b->color.r, b->color.g, b->color.b, 255);
+      SDL_RenderFillRect(ren, &b->rect);
+
+      // Button label (centered)
+      SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b,
+                             255);
+      int labelLen = strlen(b->label);
+      int lx = b->rect.x + (b->rect.w - labelLen * 12) / 2;
+      int ly = b->rect.y + (b->rect.h - 15) / 2;
+      drawText(ren, b->label, lx, ly, 3);
+    }
   }
 
   SDL_RenderPresent(ren);
@@ -625,6 +834,14 @@ int main(int argc, char *argv[]) {
   // 'win' global. For simplicity, let's make 'win' global in this small app.
   gWindow = win;
 
+  // Load ML Model
+  if (model_load("model.bin", &nn)) {
+    printf("Successfully loaded model.bin\n");
+    modelLoaded = 1;
+  } else {
+    printf("Failed to load model.bin! Make sure to run ./train first.\n");
+  }
+
   initButtons();
 
   int quit = 0;
@@ -635,11 +852,54 @@ int main(int argc, char *argv[]) {
       if (e.type == SDL_QUIT) {
         quit = 1;
       } else if (e.type == SDL_MOUSEBUTTONDOWN) {
-        // We need the window to resize it.
-        // Let's hack it: define a global `gWindow` and set it in main.
         handleButtonClick(e.button.x, e.button.y);
+      } else if (e.type == SDL_MOUSEBUTTONUP) {
+        isDrawing = 0; // Stop drawing when mouse released
+      } else if (e.type == SDL_MOUSEMOTION && isDrawing && showDraw) {
+        // Handle drag drawing on the grid
+        int x = e.motion.x;
+        int y = e.motion.y;
+        int w, h;
+        SDL_GetWindowSize(gWindow, &w, &h);
+        int calcWidth = showHistory ? w - 200 : w;
+        int startY = 120;
+        int padH = h - startY - 20;
+        int padW = calcWidth - 40;
+        int cellSize = (padW < padH ? padW : padH) / 28;
+        int gridSize = 28 * cellSize;
+        int gridX = 20 + (padW - gridSize) / 2;
+        int gridY = startY + (padH - gridSize) / 2;
+
+        if (x >= gridX && x < gridX + gridSize && y >= gridY &&
+            y < gridY + gridSize) {
+          int col = (x - gridX) / cellSize;
+          int row = (y - gridY) / cellSize;
+          if (col >= 0 && col < 28 && row >= 0 && row < 28) {
+            drawGrid[row][col] = 1;        // Set pixel ON while dragging
+            lastDrawTime = SDL_GetTicks(); // Track last draw time
+            hasDrawnSomething = 1;
+          }
+        }
       } else if (e.type == SDL_KEYDOWN) {
         handleKeyboard(e.key.keysym.sym);
+      }
+    }
+
+    // Auto-recognition: predict after user stops drawing
+    if (showDraw && hasDrawnSomething && !isDrawing) {
+      Uint32 now = SDL_GetTicks();
+      if (now - lastDrawTime > AUTO_PREDICT_DELAY) {
+        predictedDigit = predictDigit();
+        // Insert predicted digit into calculator display
+        char digit[2] = {'0' + predictedDigit, '\0'};
+        calc_inputDigit(digit);
+        // Clear grid for next drawing (keep draw mode open)
+        for (int r = 0; r < 28; r++) {
+          for (int c = 0; c < 28; c++) {
+            drawGrid[r][c] = 0;
+          }
+        }
+        hasDrawnSomething = 0;
       }
     }
 
