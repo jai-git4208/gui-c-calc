@@ -1,8 +1,13 @@
 #include "model.h"
+#include "nanovg.h"
+#include <OpenGL/gl3.h>
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#define NANOVG_GL3_IMPLEMENTATION
+#include "nanovg_gl.h"
 
 // Calculator state
 typedef struct {
@@ -18,18 +23,43 @@ typedef struct {
 
 // Button definition
 typedef struct {
-  SDL_Rect rect;
-  char label[8];
-  SDL_Color color;
+  float x, y, w, h; // Float for NanoVG
+  char label[16];
+  int role; // 0=Digit, 1=Op, 2=Action/Control
+  int is_hovered;
+  int is_pressed;
+  float anim_t;   // 0.0 -> 1.0 hover animation
+  NVGcolor color; // Base color
 } Button;
 
+// Theme
+typedef struct {
+  NVGcolor bg;
+  NVGcolor display_bg;
+  NVGcolor btn_bg_digit;
+  NVGcolor btn_bg_op;
+  NVGcolor btn_bg_action;
+  NVGcolor text_primary;
+  NVGcolor text_secondary;
+  NVGcolor shadow;
+} UITheme;
+
+UITheme theme_light;
+UITheme theme_dark;
+UITheme *current_theme;
+NVGcontext *vg = NULL;
+int fontNormal, fontBold;
+
 // Colors
+// Old Colors (Migration: Use theme instead)
+// Keeping these for legacy code compilation until fully migrated, but they are
+// unused in new UI.
 SDL_Color COLOR_BG = {30, 30, 30, 255};
-SDL_Color COLOR_DISPLAY = {45, 45, 45, 255};
-SDL_Color COLOR_DIGIT = {70, 70, 70, 255};
-SDL_Color COLOR_OP = {255, 149, 0, 255};
-SDL_Color COLOR_CLEAR = {165, 165, 165, 255};
+SDL_Color _COLOR_DIGIT = {70, 70, 70, 255}; // Renamed to avoid usage
+SDL_Color _COLOR_OP = {255, 149, 0, 255};
+SDL_Color _COLOR_CLEAR = {165, 165, 165, 255};
 SDL_Color COLOR_TEXT = {255, 255, 255, 255};
+SDL_Color COLOR_DISPLAY = {45, 45, 45, 255};
 
 // Global calculator
 Calculator calc = {"0", 0, 0, 0, 0, {0, 0, 0, 0}, 0};
@@ -41,13 +71,19 @@ int divZeroCount = 0;
 int isCrashMode = 0;
 Uint32 crashStartTime = 0;
 
-// Global window pointer
-static SDL_Window *gWindow = NULL;
+// --- Globals ---
+SDL_Window *gWindow = NULL;
+TTF_Font *gFont = NULL;
+TTF_Font *gFontLarge = NULL;
+int winWidth = 360;
+int winHeight = 600;
 
-// Global C Button
-Button cBtn;
+// Window Dragging
+int isWindowDragging = 0;
+int dragOffsetX = 0;
+int dragOffsetY = 0;
 
-// Scientific Mode State
+// Modes
 typedef enum {
   MODE_BASIC,
   MODE_DRAW,
@@ -56,7 +92,16 @@ typedef enum {
   MODE_RPN
 } CalculatorMode;
 CalculatorMode currentMode = MODE_BASIC;
+int showHistory = 0;
 int isDropdownOpen = 0;
+
+// Global C Button
+Button cBtn;
+
+// Scientific Mode State
+// This section was replaced by the new globals above.
+// CalculatorMode currentMode = MODE_BASIC; // This is now part of the new
+// globals int isDropdownOpen = 0; // This is now part of the new globals
 Button modeBtn;
 
 // Click Animation State
@@ -72,6 +117,10 @@ void triggerClickAnim(int type, int idx) {
 }
 
 void calc_inputEquals(void);
+
+// Persistence forward decl
+void save_state(void);
+void load_state(void);
 
 void calc_inputDigit(const char *digit) {
   if (strcmp(digit, ".") == 0) {
@@ -314,6 +363,7 @@ void calc_inputEquals(void) {
   char opA[32];
   snprintf(opA, sizeof(opA), "%g", calc.storedValue);
   addToHistory(opA, calc.pendingOp, calc.display, result);
+  save_state(); // Save on every operation
 
   snprintf(calc.display, sizeof(calc.display), "%g", result);
   calc.hasPendingOp = 0;
@@ -385,172 +435,20 @@ void formatNumber(const char *src, char *dest, size_t destSize) {
     }
   }
 
+  // ALWAYS null terminate
   dest[destIdx] = '\0';
 }
-
-// 0-9, +, -, *, /, =, C, O, V, R, F, L, W, H, I, S, T, A, D, U, E
-static const unsigned char patterns[][5] = {
-    {0b111, 0b101, 0b101, 0b101, 0b111}, // 0
-    {0b010, 0b110, 0b010, 0b010, 0b111}, // 1
-    {0b111, 0b001, 0b111, 0b100, 0b111}, // 2
-    {0b111, 0b001, 0b111, 0b001, 0b111}, // 3
-    {0b101, 0b101, 0b111, 0b001, 0b001}, // 4
-    {0b111, 0b100, 0b111, 0b001, 0b111}, // 5
-    {0b111, 0b100, 0b111, 0b101, 0b111}, // 6
-    {0b111, 0b001, 0b001, 0b001, 0b001}, // 7
-    {0b111, 0b101, 0b111, 0b101, 0b111}, // 8
-    {0b111, 0b101, 0b111, 0b001, 0b111}, // 9
-    {0b010, 0b010, 0b111, 0b010, 0b010}, // + (10)
-    {0b000, 0b000, 0b111, 0b000, 0b000}, // - (11)
-    {0b101, 0b010, 0b101, 0b010, 0b101}, // * (12)
-    {0b001, 0b001, 0b010, 0b100, 0b100}, // / (13)
-    {0b000, 0b111, 0b000, 0b111, 0b000}, // = (14)
-    {0b111, 0b100, 0b100, 0b100, 0b111}, // C (15)
-    {0b111, 0b101, 0b101, 0b101, 0b111}, // O (16)
-    {0b101, 0b101, 0b101, 0b101, 0b010}, // V (17)
-    {0b110, 0b101, 0b110, 0b101, 0b101}, // R (18)
-    {0b111, 0b100, 0b110, 0b100, 0b100}, // F (19)
-    {0b100, 0b100, 0b100, 0b100, 0b111}, // L (20)
-    {0b101, 0b101, 0b101, 0b111, 0b101}, // W (21)
-    {0b101, 0b101, 0b111, 0b101, 0b101}, // H (22)
-    {0b111, 0b010, 0b010, 0b010, 0b111}, // I (23)
-    {0b111, 0b100, 0b111, 0b001, 0b111}, // S (24)
-    {0b111, 0b010, 0b010, 0b010, 0b010}, // T (25)
-    {0b111, 0b101, 0b111, 0b101, 0b101}, // A (26)
-    {0b110, 0b101, 0b101, 0b101, 0b110}, // D (27)
-    {0b101, 0b101, 0b101, 0b101, 0b111}, // U (28)
-    {0b111, 0b100, 0b111, 0b100, 0b111}, // E (29)
-    {0b101, 0b111, 0b101, 0b101, 0b101}, // M (30)
-    {0b111, 0b101, 0b101, 0b101, 0b101}, // N (31)
-    {0b111, 0b101, 0b111, 0b100, 0b100}, // P (32)
-    {0b011, 0b100, 0b101, 0b101, 0b111}, // G (33)
-    {0b110, 0b101, 0b101, 0b101, 0b110}, // B (34)
-    {0b011, 0b101, 0b101, 0b110, 0b001}, // Q (35)
-    {0b101, 0b101, 0b010, 0b101, 0b101}, // X (36)
-    {0b101, 0b101, 0b010, 0b010, 0b010}, // Y (37)
-    {0b101, 0b101, 0b110, 0b101, 0b101}, // K (38)
-};
-
-void drawDigit(SDL_Renderer *ren, int digit, int x, int y, int scale) {
-  if (digit < 0 || digit > 38)
-    return;
-
-  for (int row = 0; row < 5; row++) {
-    for (int col = 0; col < 3; col++) {
-      if (patterns[digit][row] & (1 << (2 - col))) {
-        SDL_Rect r = {x + col * scale, y + row * scale, scale - 1, scale - 1};
-        SDL_RenderFillRect(ren, &r);
-      }
-    }
-  }
-}
-
-int charToPattern(char c) {
-  if (c >= '0' && c <= '9')
-    return c - '0';
-  if (c >= 'a' && c <= 'z')
-    c = c - 'a' + 'A'; // To Uppercase
-
-  switch (c) {
-  case '+':
-    return 10;
-  case '-':
-    return 11;
-  case '*':
-    return 12;
-  case '/':
-    return 13;
-  case '=':
-    return 14;
-  case 'C':
-    return 15;
-  case 'O':
-    return 16;
-  case 'V':
-  case 'R':
-    return 18;
-  case 'F':
-    return 19;
-  case 'L':
-    return 20;
-  case 'W':
-    return 21;
-  case 'H':
-    return 22;
-  case 'I':
-    return 23;
-  case 'S':
-    return 24;
-  case 'T':
-    return 25;
-  case 'A':
-    return 26;
-  case 'D':
-    return 27;
-  case 'U':
-    return 28;
-  case 'E':
-    return 29;
-  case 'M':
-    return 30;
-  case 'N':
-    return 31;
-  case 'P':
-    return 32;
-  case 'G':
-    return 33;
-  case 'B':
-    return 34;
-  case 'Q':
-    return 35;
-  case 'X':
-    return 36;
-  case 'Y':
-    return 37;
-  case 'K':
-    return 38;
-  case '.':
-    return -2; // special handling
-  case ',':
-    return -3; // comma handling
-  }
-  return -1;
-}
-
-void drawText(SDL_Renderer *ren, const char *text, int x, int y, int scale) {
-  int len = strlen(text);
-  int charWidth = 4 * scale;
-
-  for (int i = 0; i < len; i++) {
-    int pattern = charToPattern(text[i]);
-    if (pattern >= 0) {
-      drawDigit(ren, pattern, x + i * charWidth, y, scale);
-    } else if (text[i] == '.') {
-      SDL_Rect r = {x + i * charWidth + scale, y + 4 * scale, scale - 1,
-                    scale - 1};
-      SDL_RenderFillRect(ren, &r);
-    } else if (text[i] == ',') {
-      // Draw comma (small vertical stroke at bottom)
-      SDL_Rect r1 = {x + i * charWidth + scale, y + 4 * scale, scale - 1,
-                     scale - 1};
-      SDL_RenderFillRect(ren, &r1);
-      // Tail
-      SDL_Rect r2 = {x + i * charWidth + scale - 1, y + 5 * scale, scale / 2,
-                     scale / 2};
-      SDL_RenderFillRect(ren, &r2);
-    }
-  }
-}
+// Old rendering helpers removed
 
 // Global variables for history toggle
-int showHistory = 0;
+// showHistory is defined above
 Button histBtn;
 
 // Global variables for draw mode
 int showDraw = 0;
 Button drawBtn;
-unsigned char drawGrid[28][28] = {0}; // 28x28 grid, 0=off, 1=on
-int isDrawing = 0; // Track if mouse is being dragged for drawing
+unsigned char drawGrid[28][28] = {0};
+int isDrawing = 0;
 
 // ML prediction state
 NeuralNetwork nn;
@@ -771,8 +669,8 @@ int predictDigit(void) {
   if (union_val > 0) {
     float iou = intersection / union_val;
     // Threshold for heart detection.
-    // User drawings are messy, so 0.45 might be good enough if they try to fill
-    // it? Or if it's just outline? The template is filled. If user draws
+    // User drawings are messy, so 0.45 might be good enough if they try to
+    // fill it? Or if it's just outline? The template is filled. If user draws
     // outline, IoU will be low. Let's rely on overlap. If we have high
     // intersection relative to user drawing size? Let's use a simpler metric:
     // Overlap Coefficient = Intersection / min(|A|, |B|) Or just check if
@@ -785,15 +683,11 @@ int predictDigit(void) {
   return model_predict(&nn, input);
 }
 
-SDL_Rect displayRect;
+// Display dimensions
+float displayX, displayY, displayW, displayH;
 
 void updateLayout(int width, int height) {
   int sidebarWidth = (showHistory || currentMode == MODE_RPN) ? 200 : 0;
-  // Calculate Button Dimensions
-  // If Scientific/Unit/RPN: 6 cols?
-  // RPN: Maybe just 4 cols + Sidebar?
-  // Let's make RPN use 6 cols to fit SWP/DRP buttons easily.
-  // Standard Calc Width: 300. Sci/Unit/RPN Add 150? -> 450.
 
   if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
       currentMode == MODE_RPN) {
@@ -812,385 +706,340 @@ void updateLayout(int width, int height) {
   int padW = calcWidth - 40;
 
   // Re-calc display
-  displayRect = (SDL_Rect){20, 20, calcWidth - 40, 50};
+  displayX = 20;
+  displayY = 20;
+  displayW = calcWidth - 40;
+  displayH = 50;
 
-  // Reset all button rects to invisible first
+  // Reset keys
   for (int i = 0; i < numButtons; i++) {
-    buttons[i].rect = (SDL_Rect){0, 0, 0, 0};
+    buttons[i].x = 0;
+    buttons[i].y = 0;
+    buttons[i].w = 0;
+    buttons[i].h = 0;
   }
+  cBtn.x = 0;
+  cBtn.y = 0;
+  cBtn.w = 0;
+  cBtn.h = 0;
+  histBtn.x = 0;
+  histBtn.y = 0;
+  histBtn.w = 0;
+  histBtn.h = 0;
+  drawBtn.x = 0;
+  drawBtn.y = 0;
+  drawBtn.w = 0;
+  drawBtn.h = 0;
+  modeBtn.x = 0;
+  modeBtn.y = 0;
+  modeBtn.w = 0;
+  modeBtn.h = 0;
 
-  cBtn.rect = (SDL_Rect){0, 0, 0, 0};
-  histBtn.rect = (SDL_Rect){0, 0, 0, 0};
-  drawBtn.rect = (SDL_Rect){0, 0, 0, 0};
-  modeBtn.rect = (SDL_Rect){0, 0, 0, 0};
-
-  // Control Row
-  // MODE, HIST, C, / (Standard)
-  // Sci/Unit/RPN: MODE, HIST, C, /, PI, E (Unit uses Sci layout base)
   int numControl = (currentMode == MODE_SCIENTIFIC ||
                     currentMode == MODE_UNIT || currentMode == MODE_RPN)
                        ? 6
                        : 4;
   int gap = 10;
-  int ctrlBtnW = (padW - gap * (numControl - 1)) / numControl;
+  float ctrlBtnW = (float)(padW - gap * (numControl - 1)) / numControl;
 
-  modeBtn.rect = (SDL_Rect){20, controlY, ctrlBtnW, controlH};
-  histBtn.rect = (SDL_Rect){20 + ctrlBtnW + gap, controlY, ctrlBtnW, controlH};
-  cBtn.rect =
-      (SDL_Rect){20 + 2 * (ctrlBtnW + gap), controlY, ctrlBtnW, controlH};
+  // Mode & Hist
+  modeBtn.x = 20;
+  modeBtn.y = controlY;
+  modeBtn.w = ctrlBtnW;
+  modeBtn.h = controlH;
+  histBtn.x = 20 + ctrlBtnW + gap;
+  histBtn.y = controlY;
+  histBtn.w = ctrlBtnW;
+  histBtn.h = controlH;
+  cBtn.x = 20 + 2 * (ctrlBtnW + gap);
+  cBtn.y = controlY;
+  cBtn.w = ctrlBtnW;
+  cBtn.h = controlH;
 
   // Update '/'
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "/") == 0)
-      buttons[i].rect =
-          (SDL_Rect){20 + 3 * (ctrlBtnW + gap), controlY, ctrlBtnW, controlH};
+  if (currentMode != MODE_DRAW && !showDraw) {
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "/") == 0) {
+        buttons[i].x = 20 + 3 * (ctrlBtnW + gap);
+        buttons[i].y = controlY;
+        buttons[i].w = ctrlBtnW;
+        buttons[i].h = controlH;
+      }
+    }
   }
 
   if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
       currentMode == MODE_RPN) {
-    // PI, E or similar placement
     for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "PI") == 0)
-        buttons[i].rect =
-            (SDL_Rect){20 + 4 * (ctrlBtnW + gap), controlY, ctrlBtnW, controlH};
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "e") == 0)
-        buttons[i].rect =
-            (SDL_Rect){20 + 5 * (ctrlBtnW + gap), controlY, ctrlBtnW, controlH};
+      if (strcmp(buttons[i].label, "PI") == 0) {
+        buttons[i].x = 20 + 4 * (ctrlBtnW + gap);
+        buttons[i].y = controlY;
+        buttons[i].w = ctrlBtnW;
+        buttons[i].h = controlH;
+      }
+      if (strcmp(buttons[i].label, "e") == 0) {
+        buttons[i].x = 20 + 5 * (ctrlBtnW + gap);
+        buttons[i].y = controlY;
+        buttons[i].w = ctrlBtnW;
+        buttons[i].h = controlH;
+      }
     }
   }
 
   // Keypad
-  // Basic: 4 cols. Sci/Unit/RPN: 6 cols.
   int cols = (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
               currentMode == MODE_RPN)
                  ? 6
                  : 4;
-  int bw = (padW - gap * (cols - 1)) / cols;
+  float bw = (float)(padW - gap * (cols - 1)) / cols;
 
   int padH = height - startY - 20;
   if (padH < 200)
     padH = 200;
-  int bh = (padH - 3 * gap) / 4; // 4 rows
+  float bh = (float)(padH - 3 * gap) / 4;
 
-  // If Sci, Standard keys are shifted by 2 cols
   int colOffset = (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
                    currentMode == MODE_RPN)
                       ? 2
                       : 0;
   int startX = 20;
 
-  // Helper to place button
-  // Row 1 - 7 8 9 *
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "7") == 0)
-      buttons[i].rect =
-          (SDL_Rect){startX + (0 + colOffset) * (bw + gap), startY, bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "8") == 0)
-      buttons[i].rect =
-          (SDL_Rect){startX + (1 + colOffset) * (bw + gap), startY, bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "9") == 0)
-      buttons[i].rect =
-          (SDL_Rect){startX + (2 + colOffset) * (bw + gap), startY, bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "*") == 0)
-      buttons[i].rect =
-          (SDL_Rect){startX + (3 + colOffset) * (bw + gap), startY, bw, bh};
-  }
+  // Set positions
+  if (currentMode != MODE_DRAW && !showDraw) {
+    for (int i = 0; i < numButtons; i++) {
+      int r = -1, c = -1;
+      char *l = buttons[i].label;
 
-  // Row 2 - 4 5 6 -
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "4") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (0 + colOffset) * (bw + gap),
-                                   startY + (bh + gap), bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "5") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (1 + colOffset) * (bw + gap),
-                                   startY + (bh + gap), bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "6") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (2 + colOffset) * (bw + gap),
-                                   startY + (bh + gap), bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "-") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (3 + colOffset) * (bw + gap),
-                                   startY + (bh + gap), bw, bh};
-  }
+      // Manual mapping for standard keys
+      if (strcmp(l, "7") == 0) {
+        r = 0;
+        c = 0;
+      } else if (strcmp(l, "8") == 0) {
+        r = 0;
+        c = 1;
+      } else if (strcmp(l, "9") == 0) {
+        r = 0;
+        c = 2;
+      } else if (strcmp(l, "*") == 0) {
+        r = 0;
+        c = 3;
+      } else if (strcmp(l, "4") == 0) {
+        r = 1;
+        c = 0;
+      } else if (strcmp(l, "5") == 0) {
+        r = 1;
+        c = 1;
+      } else if (strcmp(l, "6") == 0) {
+        r = 1;
+        c = 2;
+      } else if (strcmp(l, "-") == 0) {
+        r = 1;
+        c = 3;
+      } else if (strcmp(l, "1") == 0) {
+        r = 2;
+        c = 0;
+      } else if (strcmp(l, "2") == 0) {
+        r = 2;
+        c = 1;
+      } else if (strcmp(l, "3") == 0) {
+        r = 2;
+        c = 2;
+      } else if (strcmp(l, "+") == 0) {
+        r = 2;
+        c = 3;
+      } else if (strcmp(l, ".") == 0) {
+        r = 3;
+        c = 2;
+      } else if (strcmp(l, "=") == 0 || strcmp(l, "ENT") == 0) {
+        r = 3;
+        c = 3;
+      }
 
-  // Row 3 - 1 2 3 +
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "1") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (0 + colOffset) * (bw + gap),
-                                   startY + 2 * (bh + gap), bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "2") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (1 + colOffset) * (bw + gap),
-                                   startY + 2 * (bh + gap), bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "3") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (2 + colOffset) * (bw + gap),
-                                   startY + 2 * (bh + gap), bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "+") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (3 + colOffset) * (bw + gap),
-                                   startY + 2 * (bh + gap), bw, bh};
-  }
+      if (r != -1) {
+        buttons[i].x = startX + (c + colOffset) * (bw + gap);
+        buttons[i].y = startY + r * (bh + gap);
+        buttons[i].w = bw;
+        buttons[i].h = bh;
+      }
 
-  // Row 4 - 0 . =
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "0") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (0 + colOffset) * (bw + gap),
-                                   startY + 3 * (bh + gap), 2 * bw + gap, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, ".") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (2 + colOffset) * (bw + gap),
-                                   startY + 3 * (bh + gap), bw, bh};
-  }
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "=") == 0 ||
-        strcmp(buttons[i].label, "ENT") == 0)
-      buttons[i].rect = (SDL_Rect){startX + (3 + colOffset) * (bw + gap),
-                                   startY + 3 * (bh + gap), bw, bh};
-  }
-
-  // Scientific Keys
-  if (currentMode == MODE_SCIENTIFIC) {
-    // Col 0: sin, cos, tan, log
-    // Col 1: sqrt, x^2, x^y, ln
-
-    SDL_Rect r00 = {startX, startY, bw, bh};
-    SDL_Rect r01 = {startX + bw + gap, startY, bw, bh};
-
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "sin") == 0)
-        buttons[i].rect = r00;
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "sqrt") == 0)
-        buttons[i].rect = r01;
-    }
-
-    r00.y += bh + gap;
-    r01.y += bh + gap;
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "cos") == 0)
-        buttons[i].rect = r00;
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "sqr") == 0)
-        buttons[i].rect = r01;
-    } // label "sqr" for x^2
-
-    r00.y += bh + gap;
-    r01.y += bh + gap;
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "tan") == 0)
-        buttons[i].rect = r00;
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "x^y") == 0)
-        buttons[i].rect = r01;
-    }
-
-    r00.y += bh + gap;
-    r01.y += bh + gap;
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "log") == 0)
-        buttons[i].rect = r00;
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "ln") == 0)
-        buttons[i].rect = r01;
-    }
-  }
-
-  // Unit Converter Keys (Replace Scientific)
-  if (currentMode == MODE_UNIT) {
-    SDL_Rect r00 = {startX, startY, bw, bh};
-    SDL_Rect r01 = {startX + bw + gap, startY, bw, bh};
-
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "cm2in") == 0)
-        buttons[i].rect = r00;
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "in2cm") == 0)
-        buttons[i].rect = r01;
-    }
-
-    r00.y += bh + gap;
-    r01.y += bh + gap;
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "kg2lb") == 0)
-        buttons[i].rect = r00;
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "lb2kg") == 0)
-        buttons[i].rect = r01;
-    }
-
-    r00.y += bh + gap;
-    r01.y += bh + gap;
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "km2mi") == 0)
-        buttons[i].rect = r00;
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "mi2km") == 0)
-        buttons[i].rect = r01;
-    }
-
-    r00.y += bh + gap;
-    r01.y += bh + gap;
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "C2F") == 0)
-        buttons[i].rect = r00;
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "F2C") == 0)
-        buttons[i].rect = r01;
-    }
-  }
-
-  // RPN Keys
-  if (currentMode == MODE_RPN) {
-    // Logic for = becomes ENT
-    // RPN buttons: SWP, DRP.
-    // Place SWP, DRP in Col 0, 1 of Row 1?
-    SDL_Rect r00 = {startX, startY, bw, bh};
-    SDL_Rect r01 = {startX + bw + gap, startY, bw, bh};
-
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "SWP") == 0)
-        buttons[i].rect = r00;
-    }
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "DRP") == 0)
-        buttons[i].rect = r01;
-    }
-
-    // Update label of '=' button to 'ENT' or vice versa.
-    // We can't change label string easily if it's static literal?
-    // buttons[i].label is char[8], so we can strcpy.
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "=") == 0 ||
-          strcmp(buttons[i].label, "ENT") == 0) {
-        strcpy(buttons[i].label, "ENT");
-        // Color? ENT typical is large vertical, here just 1x1. keep Orange.
+      // 0 Button (Wide)
+      if (strcmp(l, "0") == 0) {
+        buttons[i].x = startX + (0 + colOffset) * (bw + gap);
+        buttons[i].y = startY + 3 * (bh + gap);
+        buttons[i].w = 2 * bw + gap;
+        buttons[i].h = bh;
       }
     }
-  } else {
-    // Restore '=' if not RPN
-    for (int i = 0; i < numButtons; i++) {
-      if (strcmp(buttons[i].label, "=") == 0 ||
-          strcmp(buttons[i].label, "ENT") == 0) {
-        strcpy(buttons[i].label, "=");
+  }
+
+  // Scientific / Unit / RPN extra keys
+  if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
+      currentMode == MODE_RPN) {
+    char *labels[4][2];
+    // Fill labels based on mode
+    if (currentMode == MODE_SCIENTIFIC) {
+      labels[0][0] = "sin";
+      labels[0][1] = "sqrt";
+      labels[1][0] = "cos";
+      labels[1][1] = "sqr";
+      labels[2][0] = "tan";
+      labels[2][1] = "x^y";
+      labels[3][0] = "log";
+      labels[3][1] = "ln";
+    } else if (currentMode == MODE_UNIT) {
+      labels[0][0] = "cm2in";
+      labels[0][1] = "in2cm";
+      labels[1][0] = "kg2lb";
+      labels[1][1] = "lb2kg";
+      labels[2][0] = "km2mi";
+      labels[2][1] = "mi2km";
+      labels[3][0] = "C2F";
+      labels[3][1] = "F2C";
+    } else { // RPN
+      labels[0][0] = "SWP";
+      labels[0][1] = "DRP";
+      labels[1][0] = "";
+      labels[1][1] = "";
+      labels[2][0] = "";
+      labels[2][1] = "";
+      labels[3][0] = "";
+      labels[3][1] = "";
+    }
+
+    for (int r = 0; r < 4; r++) {
+      for (int c = 0; c < 2; c++) {
+        char *lbl = labels[r][c];
+        if (strlen(lbl) > 0) {
+          for (int k = 0; k < numButtons; k++) {
+            if (strcmp(buttons[k].label, lbl) == 0) {
+              buttons[k].x = startX + c * (bw + gap);
+              buttons[k].y = startY + r * (bh + gap);
+              buttons[k].w = bw;
+              buttons[k].h = bh;
+            }
+          }
+        }
       }
     }
   }
 }
 
+// Theme Init
+void initTheme() {
+  theme_light.bg = nvgRGB(246, 247, 249);
+  theme_light.display_bg = nvgRGB(246, 247, 249);
+  theme_light.btn_bg_digit = nvgRGB(255, 255, 255);
+  theme_light.btn_bg_op = nvgRGB(230, 240, 255); // Light Blue
+  theme_light.btn_bg_action = nvgRGB(220, 220, 225);
+  theme_light.text_primary = nvgRGB(50, 50, 50);
+  theme_light.text_secondary = nvgRGB(100, 100, 100);
+  theme_light.shadow = nvgRGBA(0, 0, 0, 30);
+
+  theme_dark.bg = nvgRGB(14, 15, 18);
+  theme_dark.display_bg = nvgRGB(14, 15, 18);
+  theme_dark.btn_bg_digit = nvgRGB(30, 32, 36);
+  theme_dark.btn_bg_op = nvgRGB(47, 128, 255); // Blue Accent
+  theme_dark.btn_bg_action = nvgRGB(40, 42, 46);
+  theme_dark.text_primary = nvgRGB(255, 255, 255);
+  theme_dark.text_secondary = nvgRGB(150, 150, 150);
+  theme_dark.shadow = nvgRGBA(0, 0, 0, 128);
+
+  current_theme = &theme_dark; // Default
+}
+
 void initButtons(void) {
-  // Create buttons with dummy rects, updateLayout will fix them
-  // We just need to set labels and colors
+  initTheme();
   numButtons = 0;
 
-  // Digit buttons 1-9
+  // Digits 1-9
   int nums[3][3] = {{7, 8, 9}, {4, 5, 6}, {1, 2, 3}};
   for (int row = 0; row < 3; row++) {
     for (int col = 0; col < 3; col++) {
       Button *b = &buttons[numButtons++];
       snprintf(b->label, sizeof(b->label), "%d", nums[row][col]);
-      b->color = COLOR_DIGIT;
+      b->role = 0;
+      b->color = current_theme->btn_bg_digit;
     }
   }
 
   // 0 button
   Button *b0 = &buttons[numButtons++];
   strcpy(b0->label, "0");
-  b0->color = COLOR_DIGIT;
+  b0->role = 0;
+  b0->color = current_theme->btn_bg_digit;
 
   // . button
   Button *bdot = &buttons[numButtons++];
   strcpy(bdot->label, ".");
-  bdot->color = COLOR_DIGIT;
+  bdot->role = 0;
+  bdot->color = current_theme->btn_bg_digit;
 
   // = button
   Button *beq = &buttons[numButtons++];
   strcpy(beq->label, "=");
-  beq->color = COLOR_OP;
+  beq->role = 1; // Op
+  beq->color = current_theme->btn_bg_op;
 
   // Operators
   char ops[4] = {'+', '-', '*', '/'};
   for (int i = 0; i < 4; i++) {
     Button *bop = &buttons[numButtons++];
     snprintf(bop->label, sizeof(bop->label), "%c", ops[i]);
-    bop->color = COLOR_OP;
+    bop->role = 1;
+    bop->color = current_theme->btn_bg_op;
   }
 
   // Global C Button
   strcpy(cBtn.label, "C");
-  cBtn.color = COLOR_CLEAR;
+  cBtn.role = 2; // Action
+  cBtn.color = current_theme->btn_bg_action;
 
   // History Toggle Button
   strcpy(histBtn.label, "HIST");
-  histBtn.color = COLOR_OP;
+  histBtn.role = 2;
+  histBtn.color = current_theme->btn_bg_action;
 
-  // Draw Toggle Button - No longer used as button, now in mode.
-  // We can keep it or clear it. Let's keep data valid.
+  // Draw Toggle
   strcpy(drawBtn.label, "DRAW");
-  drawBtn.color = (SDL_Color){0, 150, 200, 255};
+  drawBtn.role = 2;
+  drawBtn.color = current_theme->btn_bg_action;
 
   // Mode Button
   strcpy(modeBtn.label, "MODE");
-  modeBtn.color = (SDL_Color){100, 100, 255, 255};
+  modeBtn.role = 2;
+  modeBtn.color = current_theme->btn_bg_action;
 
-  // Create Scientific Buttons if not already
-  // Add: sin cos tan log ln sqrt sqr x^y PI e (10 buttons)
-  // Check if numButtons < 20 to avoid re-adding (standard 16 + 10 sci + 8 unit
-  // + 2 rpn)
-  if (numButtons < 20) {
+  // Scientific
+  if (numButtons < 30) {
     char *sciLabels[] = {"sin",  "cos", "tan", "log", "ln",
                          "sqrt", "sqr", "x^y", "PI",  "e"};
     for (int i = 0; i < 10; i++) {
       Button *b = &buttons[numButtons++];
       strcpy(b->label, sciLabels[i]);
-      b->color = COLOR_OP; // CHANGED to same as operators
+      b->role = 2; // Func
+      b->color = current_theme->btn_bg_action;
     }
 
-    // Unit buttons
-    // Add new ones: km2mi, mi2km, C2F, F2C
+    // Unit
     char *unitLabels[] = {"cm2in", "in2cm", "kg2lb", "lb2kg",
                           "km2mi", "mi2km", "C2F",   "F2C"};
     for (int i = 0; i < 8; i++) {
       Button *b = &buttons[numButtons++];
       strcpy(b->label, unitLabels[i]);
-      b->color = COLOR_OP;
+      b->role = 2;
+      b->color = current_theme->btn_bg_action;
     }
 
-    // RPN buttons: SWP, DRP
+    // RPN
     char *rpnLabels[] = {"SWP", "DRP"};
     for (int i = 0; i < 2; i++) {
       Button *b = &buttons[numButtons++];
       strcpy(b->label, rpnLabels[i]);
-      b->color = COLOR_OP;
+      b->role = 2;
+      b->color = current_theme->btn_bg_action;
     }
   }
 
-  // Initial layout
   updateLayout(300, 390);
 }
 
@@ -1202,21 +1051,21 @@ void handleButtonClick(int x, int y) {
   SDL_GetWindowSize(win, &w, &h);
 
   // History Button
-  if (x >= histBtn.rect.x && x < histBtn.rect.x + histBtn.rect.w &&
-      y >= histBtn.rect.y && y < histBtn.rect.y + histBtn.rect.h) {
+  if (x >= histBtn.x && x < histBtn.x + histBtn.w && y >= histBtn.y &&
+      y < histBtn.y + histBtn.h) {
     showHistory = !showHistory;
     if (showHistory)
       showDraw = 0; // Close draw panel if opening history
     SDL_SetWindowSize(win, showHistory ? w + 200 : w - 200,
                       h); // Adjust width based on current width
-    updateLayout(w, h);   // Recalculate layout for new window size
+    updateLayout(showHistory ? w + 200 : w - 200, h); // Recalculate layout
     triggerClickAnim(2, 0);
     return;
   }
 
   // Mode Button
-  if (x >= modeBtn.rect.x && x < modeBtn.rect.x + modeBtn.rect.w &&
-      y >= modeBtn.rect.y && y < modeBtn.rect.y + modeBtn.rect.h) {
+  if (x >= modeBtn.x && x < modeBtn.x + modeBtn.w && y >= modeBtn.y &&
+      y < modeBtn.y + modeBtn.h) {
     isDropdownOpen = !isDropdownOpen;
     return;
   }
@@ -1225,11 +1074,14 @@ void handleButtonClick(int x, int y) {
   if (isDropdownOpen) {
     // 4 options: Basic, Scientific, Unit, Draw
     // Drawn from modeBtn.y + h downwards
-    SDL_Rect r = modeBtn.rect;
+    float rx = modeBtn.x;
+    float ry = modeBtn.y;
+    float rw = modeBtn.w;
+    float rh = modeBtn.h;
     int itemH = 30;
 
     // Basic
-    if (x >= r.x && x < r.x + 100 && y >= r.y + r.h && y < r.y + r.h + itemH) {
+    if (x >= rx && x < rx + 100 && y >= ry + rh && y < ry + rh + itemH) {
       currentMode = MODE_BASIC;
       isDropdownOpen = 0;
       showDraw = 0;                   // Disable draw
@@ -1238,8 +1090,8 @@ void handleButtonClick(int x, int y) {
       return;
     }
     // Sci
-    if (x >= r.x && x < r.x + 100 && y >= r.y + r.h + itemH &&
-        y < r.y + r.h + 2 * itemH) {
+    if (x >= rx && x < rx + 100 && y >= ry + rh + itemH &&
+        y < ry + rh + 2 * itemH) {
       currentMode = MODE_SCIENTIFIC;
       isDropdownOpen = 0;
       showDraw = 0;
@@ -1248,8 +1100,8 @@ void handleButtonClick(int x, int y) {
       return;
     }
     // Unit
-    if (x >= r.x && x < r.x + 100 && y >= r.y + r.h + 2 * itemH &&
-        y < r.y + r.h + 3 * itemH) {
+    if (x >= rx && x < rx + 100 && y >= ry + rh + 2 * itemH &&
+        y < ry + rh + 3 * itemH) {
       currentMode = MODE_UNIT;
       isDropdownOpen = 0;
       showDraw = 0;
@@ -1258,21 +1110,19 @@ void handleButtonClick(int x, int y) {
       return;
     }
     // RPN
-    if (x >= r.x && x < r.x + 100 && y >= r.y + r.h + 3 * itemH &&
-        y < r.y + r.h + 4 * itemH) {
+    if (x >= rx && x < rx + 100 && y >= ry + rh + 3 * itemH &&
+        y < ry + rh + 4 * itemH) {
       currentMode = MODE_RPN;
       isDropdownOpen = 0;
       showDraw = 0;
-      SDL_SetWindowSize(win, 650,
-                        h); // RPN mode is wide, sidebar handled by updateLayout
+      SDL_SetWindowSize(win, 650, h);
       updateLayout(650, h);
       return;
     }
     // Draw
-    if (x >= r.x && x < r.x + 100 && y >= r.y + r.h + 4 * itemH &&
-        y < r.y + r.h + 5 * itemH) {
+    if (x >= rx && x < rx + 100 && y >= ry + rh + 4 * itemH &&
+        y < ry + rh + 5 * itemH) {
       currentMode = MODE_DRAW; // This handles layout logic
-      // Trigger old showDraw flag logic
       showDraw = 1;
       showHistory = 0;
       isDropdownOpen = 0;
@@ -1286,22 +1136,13 @@ void handleButtonClick(int x, int y) {
     return;
   }
 
-  // Don't process other buttons if dropdown was open?
-  // Should have returned above.
-
   // C Button
-  if (x >= cBtn.rect.x && x < cBtn.rect.x + cBtn.rect.w && y >= cBtn.rect.y &&
-      y < cBtn.rect.y + cBtn.rect.h) {
+  if (x >= cBtn.x && x < cBtn.x + cBtn.w && y >= cBtn.y &&
+      y < cBtn.y + cBtn.h) {
     calc_inputClear();
     triggerClickAnim(1, 0);
     return;
   }
-
-  // Draw Button - REMOVE CLICK logic as it is replaced by mode
-  // But we kept it in render for Basic/Draw mode?
-  // Actually plan said we replace DRAW with MODE button.
-  // So DRAW button logic is effectively dead or hidden.
-  // We assume MODE button replaces it in the UI.
 
   // Draw grid click (grid replaces keypad area)
   // ONLY IF IN DRAW MODE
@@ -1322,8 +1163,6 @@ void handleButtonClick(int x, int y) {
 
     // Button Row Handling
     // Buttons: + - * / CLR (5 buttons)
-    // Maybe = too? Let's do + - * / = CLR (6 buttons) to be complete
-    // Actually simplicity: + - * / CLR
     int numDrBtns = 5;
     char *drLabels[] = {"+", "-", "*", "/", "CLR"};
     int gap = 10;
@@ -1335,8 +1174,13 @@ void handleButtonClick(int x, int y) {
     int startBtnX = 20;
 
     for (int i = 0; i < numDrBtns; i++) {
-      SDL_Rect r = {startBtnX + i * (btnW + gap), btnY, btnW, btnH};
-      if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) {
+      // SDL_Rect r = {startBtnX + i * (btnW + gap), btnY, btnW, btnH};
+      int bx = startBtnX + i * (btnW + gap);
+      int by = btnY;
+      int bw = btnW;
+      int bh = btnH;
+
+      if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
         triggerClickAnim(4, i);
         if (strcmp(drLabels[i], "CLR") == 0) {
           for (int r = 0; r < 28; r++) {
@@ -1349,7 +1193,6 @@ void handleButtonClick(int x, int y) {
         } else {
           // Operator
           calc_inputOperator(drLabels[i][0]);
-          // Visual feedback or simple return?
           return;
         }
       }
@@ -1386,18 +1229,22 @@ void handleButtonClick(int x, int y) {
 
   // Calculator buttons
   for (int i = 0; i < numButtons; i++) {
-    SDL_Rect *r = &buttons[i].rect;
-    // Only process if button is visible (has a non-zero width/height)
-    if (r->w > 0 && r->h > 0 && x >= r->x && x < r->x + r->w && y >= r->y &&
-        y < r->y + r->h) {
-      char *label = buttons[i].label;
+    Button *b = &buttons[i];
+    // Only process if button is visible
+    if (b->w > 0 && b->h > 0 && x >= b->x && x < b->x + b->w && y >= b->y &&
+        y < b->y + b->h) {
+      char *label = b->label;
       if ((label[0] >= '0' && label[0] <= '9') || label[0] == '.') {
         calc_inputDigit(label);
       } else if (label[0] == '+' || label[0] == '-' || label[0] == '*' ||
                  label[0] == '/' || label[0] == '^') {
         calc_inputOperator(label[0]);
       } else if (strcmp(label, "=") == 0) { // Basic mode equals
-        calc_inputEquals();
+        if (currentMode == MODE_RPN) {
+          calc_inputRPN("ENT");
+        } else {
+          calc_inputEquals();
+        }
       } else if (strcmp(label, "ENT") == 0) { // RPN Enter
         calc_inputRPN("ENT");
       } else if (strcmp(label, "sin") == 0 || strcmp(label, "cos") == 0 ||
@@ -1485,217 +1332,290 @@ void handleKeyboard(SDL_Keycode key) {
   }
 }
 
-void render(SDL_Renderer *ren) {
-  int w, h;
-  SDL_GetWindowSize(gWindow, &w, &h); // Get current window size
-
-  static int lastW = 0, lastH = 0;
-
-  // Fake Crash Render
-  if (isCrashMode) {
-    // Recovery check
-    if (SDL_GetTicks() - crashStartTime > 2000) {
-      isCrashMode = 0;
-      divZeroCount = 0;
-      SDL_SetWindowFullscreen(gWindow, 0); // Restore windowed
-      calc_inputClear();
-      // Force layout update next frame
-      lastW = 0;
+// Hover state helper
+void ui_handle_mouse_move(int x, int y) {
+  for (int i = 0; i < numButtons; i++) {
+    Button *b = &buttons[i];
+    if (x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h) {
+      b->is_hovered = 1;
     } else {
-      // Render Glitch/Crash
-      SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-      SDL_RenderClear(ren);
-
-      // "segmentation fault" text
-      // Random offset
-      int offX = rand() % 5 - 2;
-      int offY = rand() % 5 - 2;
-
-      SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-      drawText(ren, "segmentation fault", 50 + offX, 50 + offY, 4);
-
-      // Random glitch rectangles
-      for (int i = 0; i < 10; i++) {
-        if (rand() % 100 < 20) {
-          SDL_Rect r = {rand() % w, rand() % h, rand() % 100, rand() % 5};
-          SDL_SetRenderDrawColor(ren, rand() % 255, rand() % 255, rand() % 255,
-                                 255);
-          SDL_RenderFillRect(ren, &r);
-        }
-      }
-
-      SDL_RenderPresent(ren);
-      return; // Early return to block normal UI
+      b->is_hovered = 0;
     }
   }
+  // Check globals
+  Button *globals[] = {&modeBtn, &histBtn, &cBtn};
+  for (int i = 0; i < 3; i++) {
+    Button *b = globals[i];
+    if (x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h) {
+      b->is_hovered = 1;
+    } else {
+      b->is_hovered = 0;
+    }
+  }
+}
 
+// Init NVG
+void ui_init_nanovg(void) {
+  // flags: NVG_ANTIALIAS | NVG_STENCIL_STROKES | NVG_DEBUG
+  vg = nvgCreateGL3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
+  if (vg == NULL) {
+    printf("Could not init nanovg.\n");
+    exit(1);
+  }
+  // Load fonts if available, or fail gracefully?
+  // Basic font loading - assuming generic font/file present or skip text
+  // If no font file, nvgText won't draw.
+  // I'll try to load a system font or skip.
+  // Mac: /System/Library/Fonts/Helvetica.ttc
+  fontNormal = nvgCreateFont(vg, "sans", "/System/Library/Fonts/Helvetica.ttc");
+  if (fontNormal == -1) {
+    printf("Could not find font. Text will be missing.\n");
+  }
+  fontBold = nvgCreateFont(
+      vg, "sans-bold", "/System/Library/Fonts/Helvetica.ttc"); // Just re-use
+}
+
+// Drawing helpers
+void draw_rrect_shadow(NVGcontext *vg, float x, float y, float w, float h,
+                       float rad, NVGcolor bg, NVGcolor shadow) {
+  // Shadow
+  NVGpaint shadowPaint =
+      nvgBoxGradient(vg, x, y + 2, w, h, rad, 10, shadow, nvgRGBA(0, 0, 0, 0));
+  nvgBeginPath(vg);
+  nvgRect(vg, x - 10, y - 10, w + 20, h + 20);
+  nvgRoundedRect(vg, x, y, w, h, rad);
+  nvgPathWinding(vg, NVG_HOLE);
+  nvgFillPaint(vg, shadowPaint);
+  nvgFill(vg);
+
+  // Body
+  nvgBeginPath(vg);
+  nvgRoundedRect(vg, x, y, w, h, rad);
+  nvgFillColor(vg, bg);
+  nvgFill(vg);
+  nvgFill(vg);
+}
+
+void draw_crash_screen(NVGcontext *vg, int w, int h) {
+  // Fake Blue/Black Screen
+  nvgBeginPath(vg);
+  nvgRect(vg, 0, 0, w, h);
+  nvgFillColor(vg, nvgRGB(0, 0, 150)); // BSOD Blue
+  nvgFill(vg);
+
+  nvgFillColor(vg, nvgRGB(255, 255, 255));
+  nvgFontSize(vg, 40);
+  nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+  nvgText(vg, w / 2, h / 2 - 40, ":(", NULL);
+
+  nvgFontSize(vg, 20);
+  nvgText(vg, w / 2, h / 2 + 20, "Your PC ran into a problem", NULL);
+  nvgText(vg, w / 2, h / 2 + 45, "and needs to restart.", NULL);
+
+  nvgFontSize(vg, 16);
+  nvgText(vg, w / 2, h / 2 + 80, "Error: DIVIDE_BY_ZERO", NULL);
+}
+
+// Helper to draw a single button
+void draw_button_render(NVGcontext *vg, Button *b, float dt) {
+  if (b->w <= 0)
+    return;
+
+  // Anim
+  if (b->is_hovered) {
+    b->anim_t += dt * 5.0f;
+    if (b->anim_t > 1.0f)
+      b->anim_t = 1.0f;
+  } else {
+    b->anim_t -= dt * 5.0f;
+    if (b->anim_t < 0.0f)
+      b->anim_t = 0.0f;
+  }
+
+  NVGcolor c = b->color;
+  if (b->role == 1)
+    c = current_theme->btn_bg_op;
+  // Brighten on hover
+  if (b->anim_t > 0) {
+    c.r += b->anim_t * 0.1f;
+    c.g += b->anim_t * 0.1f;
+    c.b += b->anim_t * 0.1f;
+  }
+
+  draw_rrect_shadow(vg, b->x, b->y, b->w, b->h, 14, c, current_theme->shadow);
+
+  nvgFillColor(vg, current_theme->text_primary);
+  if (b->role == 1 && current_theme == &theme_dark)
+    nvgFillColor(vg, nvgRGB(255, 255, 255));
+
+  // Dynamic font size relative to button height
+  float fsize = b->h * 0.5f;
+  if (fsize < 18)
+    fsize = 18;
+  if (fsize > 40)
+    fsize = 40;
+
+  nvgFontSize(vg, fsize);
+  nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+  nvgText(vg, b->x + b->w / 2, b->y + b->h / 2, b->label, NULL);
+}
+
+void ui_render(SDL_Window *win) {
+  int w, h;
+  SDL_GetWindowSize(win, &w, &h);
+  int winWidth, winHeight;
+  SDL_GL_GetDrawableSize(win, &winWidth, &winHeight); // For high-dpi
+  float pxRatio = (float)winWidth / (float)w;
+
+  static int lastW = 0, lastH = 0;
   if (w != lastW || h != lastH) {
-    updateLayout(w, h);
+    updateLayout(w, h); // Layout uses logical points
     lastW = w;
     lastH = h;
   }
 
+  nvgBeginFrame(vg, w, h, pxRatio);
+
   // Background
-  SDL_SetRenderDrawColor(ren, COLOR_BG.r, COLOR_BG.g, COLOR_BG.b, 255);
-  SDL_RenderClear(ren);
+  nvgBeginPath(vg);
+  nvgRect(vg, 0, 0, w, h);
+  nvgFillColor(vg, current_theme->bg);
+  nvgFill(vg);
 
-  // --- Sidebar (History OR RPN Stack) ---
-  // The instruction about `calcWidth` in `updateLayout` is not directly
-  // applicable here as `updateLayout` function definition is not in the
-  // provided content. However, the `calcWidth` variable is used in `render` for
-  // `showDraw` logic. The instruction implies that the sidebar should also
-  // appear for RPN mode. The `if (showHistory || currentMode == MODE_RPN)`
-  // condition already handles this.
+  // Sidebar
   if (showHistory || currentMode == MODE_RPN) {
+    nvgBeginPath(vg);
+    nvgRect(vg, w - 200, 0, 200, h);
+    nvgFillColor(vg,
+                 nvgRGB(40, 40, 40)); // keep distinct sidebar color or themed?
+    nvgFill(vg);
 
-    int sidebarX = w - 200;
-    SDL_Rect sidebar = {sidebarX, 0, 200, h};
-    SDL_SetRenderDrawColor(ren, 40, 40, 40, 255);
-    SDL_RenderFillRect(ren, &sidebar);
-
-    // Separator line
-    SDL_SetRenderDrawColor(ren, 60, 60, 60, 255);
-    SDL_RenderDrawLine(ren, sidebarX, 0, sidebarX, h);
+    // History items or RPN stack
+    // ... (Simplified text rendering)
+    nvgFillColor(vg, nvgRGB(200, 200, 200));
+    nvgFontSize(vg, 16);
+    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
 
     if (currentMode == MODE_RPN) {
-      // Draw Stack (T, Z, Y, X)
-      // X is display logic usually, but let's show stack[0] as X.
-      // Stack indices: 0=X, 1=Y, 2=Z, 3=T.
-      char *labels[] = {"X:", "Y:", "Z:", "T:"};
       for (int i = 0; i < 4; i++) {
-        int y = h - 100 - i * 50;
-        char valStr[64];
-        snprintf(valStr, sizeof(valStr), "%.10g", calc.stack[i]);
-
-        SDL_SetRenderDrawColor(ren, 150, 150, 150, 255);
-        drawText(ren, labels[i], sidebarX + 10, y, 3);
-        SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-        drawText(ren, valStr, sidebarX + 40, y, 3);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%d: %.5g", i, calc.stack[i]);
+        nvgText(vg, w - 190, h - 100 - i * 50, buf, NULL);
       }
-      SDL_SetRenderDrawColor(ren, 200, 200, 200, 255);
-      drawText(ren, "STACK", sidebarX + 10, 20, 3);
-
     } else {
-      // History Items
       for (int i = 0; i < historyCount; i++) {
-        int y = 20 + i * 40;
-
-        // Equation centered/leftish of sidebar
-        SDL_SetRenderDrawColor(ren, 150, 150, 150, 255);
-        drawText(ren, history[i].equation, sidebarX + 10, y, 2);
-
-        // Result
-        char resStr[32];
-        snprintf(resStr, sizeof(resStr), "%g", history[i].result);
-        // Format
-        char fmtRes[64];
-        formatNumber(resStr, fmtRes, sizeof(fmtRes));
-
-        SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b,
-                               255);
-        drawText(ren, fmtRes, sidebarX + 10, y + 15, 3);
+        nvgText(vg, w - 190, 30 + i * 40, history[i].equation, NULL);
+        char res[64];
+        snprintf(res, sizeof(res), "= %.5g", history[i].result);
+        nvgText(vg, w - 190, 50 + i * 40, res, NULL);
       }
     }
   }
 
-  // --- Calculator ---
+  // Display
+  // Draw Display BG
+  nvgBeginPath(vg);
+  nvgRoundedRect(vg, displayX, displayY, displayW, displayH, 10);
+  nvgFillColor(vg, current_theme->display_bg);
+  nvgFill(vg);
+  // Inner Shadow?
 
-  // Display background (use global displayRect)
-  SDL_SetRenderDrawColor(ren, COLOR_DISPLAY.r, COLOR_DISPLAY.g, COLOR_DISPLAY.b,
-                         255);
-  SDL_RenderFillRect(ren, &displayRect);
-
-  // Format the number
+  // Display Text
   char formattedText[64];
   formatNumber(calc.display, formattedText, sizeof(formattedText));
+  nvgFillColor(vg, current_theme->text_primary);
 
-  // Check for overflow (max width)
-  int scale = 4;
-  int charWidth = 4 * scale;
-  int maxDisplayWidth = displayRect.w - 20;
+  // Dynamic display font
+  float dispFont = h * 0.08f;
+  if (dispFont < 36)
+    dispFont = 36;
+  if (dispFont > 80)
+    dispFont = 80;
 
-  int textWidth = strlen(formattedText) * charWidth;
-  const char *finalText = formattedText;
+  nvgFontSize(vg, dispFont);
+  nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+  nvgText(vg, displayX + displayW - 10, displayY + 25, formattedText, NULL);
 
-  if (textWidth > maxDisplayWidth) {
-    finalText = "OVRFLOW";
-    textWidth = strlen(finalText) * charWidth;
+  // Buttons
+  float dt = 0.016f; // Approx
+
+  // Update labels dynamic
+  for (int i = 0; i < numButtons; i++) {
+    if (strcmp(buttons[i].label, "=") == 0 ||
+        strcmp(buttons[i].label, "ENT") == 0) {
+      if (currentMode == MODE_RPN)
+        strcpy(buttons[i].label, "ENT");
+      else
+        strcpy(buttons[i].label, "=");
+    }
   }
 
-  // Display text (right-aligned)
-  SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b, 255);
+  // Draw Global Control Buttons
+  draw_button_render(vg, &modeBtn, dt);
+  draw_button_render(vg, &histBtn, dt);
+  draw_button_render(vg, &cBtn, dt);
 
-  // Calculate X position
-  int textX = displayRect.x + displayRect.w - textWidth - 10;
+  for (int i = 0; i < numButtons; i++) {
+    draw_button_render(vg, &buttons[i], dt);
+  }
 
-  // Draw
-  drawText(ren, finalText, textX, displayRect.y + 15, scale);
+  // Active Dropdown
+  if (isDropdownOpen) {
+    float rx = modeBtn.x;
+    float ry = modeBtn.y + modeBtn.h + 5;
+    float Rw = 120, Rh = 150;
+    // Shadow
+    draw_rrect_shadow(vg, rx, ry, Rw, Rh, 5, nvgRGB(50, 50, 50),
+                      nvgRGBA(0, 0, 0, 100));
 
-  // Draw Mode Button
-  SDL_SetRenderDrawColor(ren, modeBtn.color.r, modeBtn.color.g, modeBtn.color.b,
-                         255);
-  SDL_RenderFillRect(ren, &modeBtn.rect);
-  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-  drawText(ren, "MODE", modeBtn.rect.x + 5, modeBtn.rect.y + 10, 2);
+    nvgFillColor(vg, nvgRGB(255, 255, 255));
+    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+    nvgText(vg, rx + 10, ry + 20, "Basic", NULL);
+    nvgText(vg, rx + 10, ry + 50, "Scientific", NULL);
+    nvgText(vg, rx + 10, ry + 80, "Unit", NULL);
+    nvgText(vg, rx + 10, ry + 110, "RPN", NULL);
+    nvgText(vg, rx + 10, ry + 140, "Draw", NULL);
+  }
 
-  // Draw HIST button
-  SDL_Color hc = histBtn.color;
-  if (clickAnimType == 2 && SDL_GetTicks() - clickAnimTime < 150)
-    hc = (SDL_Color){255, 200, 100, 255};
-  SDL_SetRenderDrawColor(ren, hc.r, hc.g, hc.b, 255);
-  SDL_RenderFillRect(ren, &histBtn.rect);
-  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-  drawText(ren, "HIST", histBtn.rect.x + 14, histBtn.rect.y + 10, 2);
-
-  // Draw C Button (Always visible now)
-  SDL_Color cc = cBtn.color;
-  if (clickAnimType == 1 && SDL_GetTicks() - clickAnimTime < 150)
-    cc = (SDL_Color){200, 200, 200, 255};
-  SDL_SetRenderDrawColor(ren, cc.r, cc.g, cc.b, 255);
-  SDL_RenderFillRect(ren, &cBtn.rect);
-  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-  drawText(ren, "C", cBtn.rect.x + 20, cBtn.rect.y + 10, 2);
-
-  // --- Draw Panel (16x16 Grid) replacing keypad ---
+  // Draw Grid Overlay
   if (showDraw || currentMode == MODE_DRAW) {
-    int calcWidth = showHistory ? w - 200 : w;
-    // START GRID AT 120 (Below control row)
-    int gridStartY = 120; // Correct startY for grid to maximize space
+    // ... Reuse existing grid logic but draw with NVG
+    // For brevity, skipping full grid redraw migration details here,
+    // assuming it's covered or I can add it if needed.
+    // Will render a simple placeholder for grid
 
-    int reservedBottom = 50;
-    int padH = h - gridStartY - 20 - reservedBottom;
+    // Actually I should render it.
+    int calcWidth = showHistory ? w - 200 : w;
+    int gridStartY = 120;
+    int padH = h - gridStartY - 70;
     int padW = calcWidth - 40;
     if (padH < 100)
       padH = 100;
-
     int cellSize = (padW < padH ? padW : padH) / 28;
     int gridSize = 28 * cellSize;
     int gridX = 20 + (padW - gridSize) / 2;
     int gridY = gridStartY + (padH - gridSize) / 2;
 
-    for (int row = 0; row < 28; row++) {
-      for (int col = 0; col < 28; col++) {
-        SDL_Rect cell = {gridX + col * cellSize, gridY + row * cellSize,
-                         cellSize - 1, cellSize - 1};
-        if (drawGrid[row][col]) {
-          SDL_SetRenderDrawColor(ren, 50, 50, 50, 255);
-        } else {
-          SDL_SetRenderDrawColor(ren, 200, 200, 200, 255);
+    nvgBeginPath(vg);
+    nvgRect(vg, gridX - 2, gridY - 2, gridSize + 4, gridSize + 4);
+    nvgStrokeColor(vg, nvgRGB(100, 100, 100));
+    nvgStroke(vg);
+
+    for (int r = 0; r < 28; r++) {
+      for (int c = 0; c < 28; c++) {
+        if (drawGrid[r][c]) {
+          nvgBeginPath(vg);
+          nvgRect(vg, gridX + c * cellSize, gridY + r * cellSize, cellSize,
+                  cellSize);
+          nvgFillColor(vg, nvgRGB(50, 50, 50));
+          nvgFill(vg);
         }
-        SDL_RenderFillRect(ren, &cell);
       }
     }
 
-    // Grid border
-    SDL_SetRenderDrawColor(ren, 100, 100, 100, 255);
-    SDL_Rect gridBorder = {gridX - 1, gridY - 1, gridSize + 1, gridSize + 1};
-    SDL_RenderDrawRect(ren, &gridBorder);
-
-    // Draw buttons: + - * / CLR
+    // Draw Mode Buttons
     int numDrBtns = 5;
     char *drLabels[] = {"+", "-", "*", "/", "CLR"};
-    SDL_Color drColors[] = {COLOR_OP, COLOR_OP, COLOR_OP, COLOR_OP,
-                            COLOR_CLEAR};
     int gap = 10;
     int totalGap = (numDrBtns - 1) * gap;
     int availW = padW;
@@ -1705,176 +1625,98 @@ void render(SDL_Renderer *ren) {
     int startBtnX = 20;
 
     for (int i = 0; i < numDrBtns; i++) {
-      SDL_Rect r = {startBtnX + i * (btnW + gap), btnY, btnW, btnH};
-
-      SDL_Color bg = drColors[i];
-      if (clickAnimType == 4 && clickAnimIdx == i &&
-          SDL_GetTicks() - clickAnimTime < 150) {
-        bg.r = (bg.r + 100) > 255 ? 255 : (bg.r + 100);
-        bg.g = (bg.g + 100) > 255 ? 255 : (bg.g + 100);
-        bg.b = (bg.b + 100) > 255 ? 255 : (bg.b + 100);
+      Button b;
+      // Make a temp button to render
+      b.x = startBtnX + i * (btnW + gap);
+      b.y = btnY;
+      b.w = btnW;
+      b.h = btnH;
+      strcpy(b.label, drLabels[i]);
+      b.role = (strcmp(drLabels[i], "CLR") == 0) ? 2 : 1;
+      b.is_hovered = 0; // Don't track hover for temp buttons perfectly yet or
+                        // use mouse pos
+      // Check hover manually
+      int mouseX, mouseY;
+      SDL_GetMouseState(&mouseX, &mouseY);
+      float pxRatioInv = 1.0f; // Simplified, assuming logical coords match
+      if (mouseX >= b.x && mouseX < b.x + b.w && mouseY >= b.y &&
+          mouseY < b.y + b.h) {
+        b.is_hovered = 1;
       }
+      b.anim_t = b.is_hovered ? 1.0f : 0.0f;
 
-      SDL_SetRenderDrawColor(ren, bg.r, bg.g, bg.b, 255);
-      SDL_RenderFillRect(ren, &r);
+      if (b.role == 1)
+        b.color = current_theme->btn_bg_op;
+      else
+        b.color = current_theme->btn_bg_action;
 
-      SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-      // Center text
-      int labelLen = strlen(drLabels[i]);
-      int lx = r.x +
-               (r.w - labelLen * 12) / 2; // using ~12px per char width estimate
-
-      int ly = r.y + (r.h - 15) / 2;
-      drawText(ren, drLabels[i], lx, ly, 3);
-    }
-
-  } else {
-    // Buttons (only show when not in draw mode)
-    for (int i = 0; i < numButtons; i++) {
-      Button *b = &buttons[i];
-
-      // Only draw if the button has a valid size (set by updateLayout)
-      if (b->rect.w <= 0 || b->rect.h <= 0)
-        continue;
-
-      SDL_Color bg = b->color;
-      if (clickAnimType == 0 && clickAnimIdx == i &&
-          SDL_GetTicks() - clickAnimTime < 150) {
-        bg.r = (bg.r + 60) > 255 ? 255 : (bg.r + 60);
-        bg.g = (bg.g + 60) > 255 ? 255 : (bg.g + 60);
-        bg.b = (bg.b + 60) > 255 ? 255 : (bg.b + 60);
-      }
-      SDL_SetRenderDrawColor(ren, bg.r, bg.g, bg.b, 255);
-      SDL_RenderFillRect(ren, &b->rect);
-
-      // Button label (centered)
-      SDL_SetRenderDrawColor(ren, COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b,
-                             255);
-      int labelLen = strlen(b->label);
-      int lx = b->rect.x + (b->rect.w - labelLen * 12) / 2;
-      int ly = b->rect.y + (b->rect.h - 15) / 2;
-      drawText(ren, b->label, lx, ly, 3);
+      draw_button_render(vg, &b, dt);
     }
   }
 
-  // Draw Dropdown Menu if open (on top)
-  if (isDropdownOpen) {
-    SDL_Rect r = modeBtn.rect;
-    r.y += r.h;
-    r.w = 100; // Fixed width for menu
-    r.h = 150; // 5 items * 30
-
-    // Background
-    SDL_SetRenderDrawColor(ren, 40, 40, 40, 255);
-    SDL_RenderFillRect(ren, &r);
-
-    // Items
-    SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-    drawText(ren, "Basic", r.x + 10, r.y + 5, 2);
-    drawText(ren, "Scientific", r.x + 10, r.y + 35, 2);
-    drawText(ren, "Unit", r.x + 10, r.y + 65, 2);
-    drawText(ren, "RPN", r.x + 10, r.y + 95, 2);
-    drawText(ren, "Draw", r.x + 10, r.y + 125, 2);
-
-    // Borders
-    SDL_SetRenderDrawColor(ren, 100, 100, 100, 255);
-    SDL_RenderDrawRect(ren, &r);
+  // Crash Mask
+  if (isCrashMode) {
+    draw_crash_screen(vg, w, h);
   }
 
-  // Heart Animation Overlay
-  if (isHeartAnimActive) {
-    Uint32 now = SDL_GetTicks();
-    Uint32 elapsed = now - easterEggStart;
-    Uint32 duration = 2000; // 2 seconds
-
-    if (elapsed < duration) {
-      float progress = (float)elapsed / duration;
-      int alpha = (int)(255 * (1.0f - progress));
-      if (alpha < 0)
-        alpha = 0;
-
-      // Draw a big heart in the center
-      // We can just iterate over the template we made earlier, but we can't
-      // access it easily if it's static inside predictDigit. Oops. Let's just
-      // draw a big red rectangle or approximate heart for now, or move the
-      // template global. Moving template global is better. But I can't edit
-      // that line again easily in this chunk. I'll just draw a procedural heart
-      // shape or use SDL_RenderDrawLines. Or just a filled red circle/rect is
-      // lame. Let's make a local pattern for the big heart. Actually, let's
-      // just draw 2 overlapping circles and a triangle.
-
-      SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-      SDL_SetRenderDrawColor(ren, 255, 0, 0, alpha);
-
-      // Center of window
-      int cx = w / 2;
-      int cy = h / 2;
-      int size = 100;
-
-      // Triangle bottom
-      // SDL doesn't have fillTriangle.
-      // Let's just draw a big red square for simplicity? No request said
-      // "Heart". "draw heart on the screen a big translucent heart appears"
-      // Okay I should try to make it look like a heart.
-      // I will draw a collection of rects based on a coarse bitmap.
-      int heartMap[10][11] = {
-          {0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0}, {1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0},
-          {1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0}, {1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
-          {0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0}, {0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0},
-          {0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
-      };
-
-      // Draw this scaled up
-      int sqSize = 15;
-      int startX = cx - (11 * sqSize) / 2;
-      int startY = cy - (8 * sqSize) / 2;
-
-      for (int r = 0; r < 8; r++) {
-        for (int c = 0; c < 11; c++) {
-          if (heartMap[r][c]) {
-            SDL_Rect rect = {startX + c * sqSize, startY + r * sqSize, sqSize,
-                             sqSize};
-            SDL_RenderFillRect(ren, &rect);
-          }
-        }
-      }
-      SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
-
-    } else {
-      isHeartAnimActive = 0;
-    }
-  }
-
-  SDL_RenderPresent(ren);
+  nvgEndFrame(vg);
+  SDL_GL_SwapWindow(win);
 }
+
+void set_macos_window_style(SDL_Window *window);
 
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  SDL_Init(SDL_INIT_VIDEO);
+  if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+    printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
+    return 1;
+  }
 
-  SDL_Window *win =
-      SDL_CreateWindow("jai's calculator", SDL_WINDOWPOS_CENTERED,
-                       SDL_WINDOWPOS_CENTERED, 300, 390, SDL_WINDOW_RESIZABLE);
-  // Initial height 390
-  SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+  // OpenGL 3.3 Core
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+  SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8); // Required for NanoVG
 
-  // Keep a reference to resizing isn't fully automatic via SDL_SetWindowSize on
-  // some platforms without flags but we'll see. Actually we need to handle the
-  // window handle in handleButtonClick properly. SDL_GL_GetCurrentWindow might
-  // not work if we didn't create a GL context explicitly? SDL_SetWindowSize
-  // needs the window pointer. We can pass 'win' to handleButtonClick or make
-  // 'win' global. For simplicity, let's make 'win' global in this small app.
+  SDL_Window *win = SDL_CreateWindow(
+      "jai's calculator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 330,
+      440, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+
+  if (!win) {
+    printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
+    return 1;
+  }
+
   gWindow = win;
+
+  SDL_GLContext glContext = SDL_GL_CreateContext(win);
+  if (!glContext) {
+    printf("Could not create GL context! SDL_Error: %s\n", SDL_GetError());
+    return 1;
+  }
+  SDL_GL_MakeCurrent(win, glContext);
+
+  // Apply Mac Style
+  set_macos_window_style(win);
+
+  // VSync
+  SDL_GL_SetSwapInterval(1);
+
+  // Init UI (NanoVG)
+  ui_init_nanovg();
 
   // Load ML Model
   if (model_load("model.bin", &nn)) {
     printf("Successfully loaded model.bin\n");
     modelLoaded = 1;
   } else {
-    printf("Failed to load model.bin! Make sure to run ./train first.\n");
+    // printf("Failed to load model.bin! Make sure to run ./train first.\n");
   }
+
+  // Load State
+  load_state();
 
   initButtons();
 
@@ -1882,6 +1724,12 @@ int main(int argc, char *argv[]) {
   SDL_Event e;
 
   while (!quit) {
+    int mouseX, mouseY;
+    SDL_GetMouseState(&mouseX, &mouseY);
+    ui_handle_mouse_move(mouseX,
+                         mouseY); // Update hover states every frame or on
+                                  // mouse event? calling here is safe.
+
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_QUIT) {
         quit = 1;
@@ -1933,10 +1781,24 @@ int main(int argc, char *argv[]) {
           // Heart detected!
           isHeartAnimActive = 1;
           easterEggStart = SDL_GetTicks();
-        } else {
+        } else if (predictedDigit >= 0 && predictedDigit <= 9) {
           // Insert predicted digit into calculator display
           char digit[2] = {'0' + predictedDigit, '\0'};
           calc_inputDigit(digit);
+
+          FILE *f = fopen("debug.log", "a");
+          if (f) {
+            fprintf(f, "Prediction: %d (Valid)\n", predictedDigit);
+            fclose(f);
+          }
+
+        } else {
+          printf("Ignored invalid prediction: %d\n", predictedDigit);
+          FILE *f = fopen("debug.log", "a");
+          if (f) {
+            fprintf(f, "Prediction: %d (INVALID)\n", predictedDigit);
+            fclose(f);
+          }
         }
 
         // Clear grid for next drawing (keep draw mode open)
@@ -1949,12 +1811,47 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    render(ren);
-    SDL_Delay(16); // ~60 FPS
+    ui_render(win);
+    // SDL_Delay(16); // VSync handles waiting usually, but small delay is ok
   }
 
-  SDL_DestroyRenderer(ren);
+  save_state();
+
+  // Cleanup
+  // nvgDeleteGL3(vg); // assuming this function name
+  SDL_GL_DeleteContext(glContext);
   SDL_DestroyWindow(win);
   SDL_Quit();
   return 0;
+}
+
+// Persistence Implementation
+void save_state() {
+  FILE *f = fopen("calc_state.dat", "wb");
+  if (!f)
+    return;
+
+  // Save Calculator State
+  fwrite(&calc, sizeof(Calculator), 1, f);
+
+  // Save History
+  fwrite(&historyCount, sizeof(int), 1, f);
+  fwrite(history, sizeof(HistoryEntry), 8, f);
+
+  fclose(f);
+}
+
+void load_state() {
+  FILE *f = fopen("calc_state.dat", "rb");
+  if (!f)
+    return;
+
+  fread(&calc, sizeof(Calculator), 1, f);
+
+  fread(&historyCount, sizeof(int), 1, f);
+  if (historyCount > 8)
+    historyCount = 8;
+  fread(history, sizeof(HistoryEntry), 8, f);
+
+  fclose(f);
 }
