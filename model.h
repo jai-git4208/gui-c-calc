@@ -16,8 +16,6 @@ typedef struct {
   float b2[OUTPUT_NODES];
 } NeuralNetwork;
 
-// Load model from file
-// Returns 1 on success, 0 on failure
 static int model_load(const char *filename, NeuralNetwork *nn) {
   FILE *f = fopen(filename, "rb");
   if (!f)
@@ -37,32 +35,30 @@ static int model_load(const char *filename, NeuralNetwork *nn) {
   return (read == expected);
 }
 
-// Inference
-// Returns predicted digit (0-9)
 static int model_predict(NeuralNetwork *nn, const float *input) {
   float hidden[HIDDEN_NODES];
   float output[OUTPUT_NODES];
 
-  // Layer 1: Forward
+  
   for (int i = 0; i < HIDDEN_NODES; i++) {
     float sum = nn->b1[i];
     for (int j = 0; j < INPUT_NODES; j++) {
       sum += input[j] * nn->w1[j][i];
     }
-    // ReLU Activation
+    
     hidden[i] = sum > 0 ? sum : 0;
   }
 
-  // Layer 2: Forward
+  
   for (int i = 0; i < OUTPUT_NODES; i++) {
     float sum = nn->b2[i];
     for (int j = 0; j < HIDDEN_NODES; j++) {
       sum += hidden[j] * nn->w2[j][i];
     }
-    output[i] = sum; // We can use logits directly for argmax
+    output[i] = sum; 
   }
 
-  // Argmax
+  
   int maxIdx = 0;
   float maxVal = output[0];
   for (int i = 1; i < OUTPUT_NODES; i++) {

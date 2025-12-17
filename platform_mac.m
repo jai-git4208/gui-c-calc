@@ -9,11 +9,11 @@ void set_macos_window_style(SDL_Window *window) {
   if (SDL_GetWindowWMInfo(window, &info)) {
     if (info.subsystem == SDL_SYSWM_COCOA) {
       NSWindow *nsWindow = info.info.cocoa.window;
-      // Apply FullSizeContentView to hide titlebar but keep buttons
+      
       [nsWindow setStyleMask:[nsWindow styleMask] |
-                             (1 << 15)]; // NSWindowStyleMaskFullSizeContentView
+                             (1 << 15)]; 
       [nsWindow setTitlebarAppearsTransparent:YES];
-      [nsWindow setTitleVisibility:1]; // NSWindowTitleHidden
+      [nsWindow setTitleVisibility:1]; 
     }
   }
 }
