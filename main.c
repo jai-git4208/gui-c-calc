@@ -75,8 +75,8 @@ Uint32 crashStartTime = 0;
 SDL_Window *gWindow = NULL;
 TTF_Font *gFont = NULL;
 TTF_Font *gFontLarge = NULL;
-int winWidth = 360;
-int winHeight = 600;
+int winWidth = 232;
+int winHeight = 306;
 
 // Window Dragging
 int isWindowDragging = 0;
@@ -691,11 +691,9 @@ void updateLayout(int width, int height) {
 
   if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
       currentMode == MODE_RPN) {
-    if (width < 450)
-      width = 450;
+    // Width override removed for responsiveness
   } else {
-    if (width < 300)
-      width = 300;
+    // Basic / Draw Mode - allow smaller width
   }
 
   int controlY = 80;
@@ -794,8 +792,9 @@ void updateLayout(int width, int height) {
   float bw = (float)(padW - gap * (cols - 1)) / cols;
 
   int padH = height - startY - 20;
-  if (padH < 200)
-    padH = 200;
+  // Removed hard clamp so buttons shrink to fit
+  if (padH < 50)
+    padH = 50; // Minimal safety only
   float bh = (float)(padH - 3 * gap) / 4;
 
   int colOffset = (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
@@ -995,7 +994,7 @@ void initButtons(void) {
   cBtn.color = current_theme->btn_bg_action;
 
   // History Toggle Button
-  strcpy(histBtn.label, "HIST");
+  strcpy(histBtn.label, "H");
   histBtn.role = 2;
   histBtn.color = current_theme->btn_bg_action;
 
@@ -1005,7 +1004,7 @@ void initButtons(void) {
   drawBtn.color = current_theme->btn_bg_action;
 
   // Mode Button
-  strcpy(modeBtn.label, "MODE");
+  strcpy(modeBtn.label, "M");
   modeBtn.role = 2;
   modeBtn.color = current_theme->btn_bg_action;
 
@@ -1040,7 +1039,7 @@ void initButtons(void) {
     }
   }
 
-  updateLayout(300, 390);
+  updateLayout(232, 306);
 }
 
 // Global window pointer moved to top
@@ -1681,8 +1680,12 @@ int main(int argc, char *argv[]) {
   SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8); // Required for NanoVG
 
   SDL_Window *win = SDL_CreateWindow(
-      "jai's calculator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 330,
-      440, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+      "jai's calculator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 232,
+      306, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+
+  if (win) {
+    SDL_SetWindowMinimumSize(win, 220, 300);
+  }
 
   if (!win) {
     printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
