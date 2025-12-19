@@ -854,8 +854,6 @@ void updateLayout(int width, int height) {
     return;
   }
 
-  int sidebarWidth = (showHistory || currentMode == MODE_RPN) ? 200 : 0;
-
   if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
       currentMode == MODE_RPN) {
 
@@ -1227,7 +1225,6 @@ void handleButtonClick(int x, int y) {
 
     float rx = modeBtn.x;
     float ry = modeBtn.y;
-    float rw = modeBtn.w;
     float rh = modeBtn.h;
     int itemH = 30;
 
@@ -1499,8 +1496,12 @@ void handleKeyboard(SDL_Keycode key) {
     return;
   }
 
-  if (key >= SDLK_KP_0 && key <= SDLK_KP_9) {
-    char digit[2] = {(char)('0' + (key - SDLK_KP_0)), '\0'};
+  if ((key >= SDLK_KP_1 && key <= SDLK_KP_9) || key == SDLK_KP_0) {
+    char digit[2] = {'\0', '\0'};
+    if (key == SDLK_KP_0)
+      digit[0] = '0';
+    else
+      digit[0] = (char)('1' + (key - SDLK_KP_1));
     calc_inputDigit(digit);
     return;
   }
@@ -1665,8 +1666,6 @@ void draw_graph_grid(NVGcontext *vg, float x, float y, float w, float h) {
   nvgFillColor(vg, current_theme->bg);
   nvgFill(vg);
 
-  float midX = x + w / 2.0f;
-  float midY = y + h / 2.0f;
   float scaleX = w / (xMax - xMin);
   float scaleY = h / (yMax - yMin);
 
@@ -1721,7 +1720,6 @@ void draw_graph_curve(NVGcontext *vg, float x, float y, float w, float h) {
   nvgStrokeWidth(vg, 3.0f);
   nvgStrokeColor(vg, nvgRGB(47, 128, 255)); // Blue curve
 
-  float scaleX = w / (xMax - xMin);
   float scaleY = h / (yMax - yMin);
 
   int first = 1;
@@ -1837,6 +1835,7 @@ void ui_render(SDL_Window *win) {
   int winWidth, winHeight;
   SDL_GL_GetDrawableSize(win, &winWidth, &winHeight);
   float pxRatio = (float)winWidth / (float)w;
+  float dt = 0.016f;
 
   static int lastW = 0, lastH = 0;
   if (w != lastW || h != lastH) {
@@ -1945,8 +1944,6 @@ void ui_render(SDL_Window *win) {
       nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
       nvgText(vg, displayX + 10, displayY + 5, "PRIME", NULL);
     }
-
-    float dt = 0.016f;
     for (int i = 0; i < numButtons; i++) {
       if (strcmp(buttons[i].label, "=") == 0 ||
           strcmp(buttons[i].label, "ENT") == 0) {
@@ -2037,7 +2034,6 @@ void ui_render(SDL_Window *win) {
 
       int mouseX, mouseY;
       SDL_GetMouseState(&mouseX, &mouseY);
-      float pxRatioInv = 1.0f;
       if (mouseX >= b.x && mouseX < b.x + b.w && mouseY >= b.y &&
           mouseY < b.y + b.h) {
         b.is_hovered = 1;
