@@ -19,18 +19,18 @@ typedef struct {
   char pendingOp;
   int hasPendingOp;
   int clearOnNextDigit;
-  
+
   double stack[4];
   int stackSize;
 } Calculator;
 typedef struct {
-  float x, y, w, h; 
+  float x, y, w, h;
   char label[16];
-  int role; 
+  int role;
   int is_hovered;
   int is_pressed;
-  float anim_t;   
-  NVGcolor color; 
+  float anim_t;
+  NVGcolor color;
 } Button;
 typedef struct {
   NVGcolor bg;
@@ -69,7 +69,7 @@ Uint32 equalsPressTime = 0;
 int isEqualsDown = 0;
 char inputSequence[16] = "";
 int isPrimeResult = 0;
-char specialMessage[32] = ""; 
+char specialMessage[32] = "";
 int isDevMode = 0;
 Uint32 frameCount = 0;
 float fps = 0.0f;
@@ -96,7 +96,8 @@ typedef enum {
   MODE_DRAW,
   MODE_SCIENTIFIC,
   MODE_UNIT,
-  MODE_RPN
+  MODE_RPN,
+  MODE_GRAPH
 } CalculatorMode;
 CalculatorMode currentMode = MODE_BASIC;
 int showHistory = 0;
@@ -104,10 +105,20 @@ int isDropdownOpen = 0;
 Button cBtn;
 
 Button modeBtn;
-int clickAnimType =
-    -1; 
+int clickAnimType = -1;
 int clickAnimIdx = -1;
 Uint32 clickAnimTime = 0;
+
+// Graphing state
+char graphEq[128] = "";
+float xMin = -10.0f, xMax = 10.0f;
+float yMin = -5.0f, yMax = 5.0f;
+int isSidebarExpanded = 1;
+float graphAreaX, graphAreaY, graphAreaW, graphAreaH;
+float sidebarX, sidebarY, sidebarW, sidebarH;
+float keypadX, keypadY, keypadW, keypadH;
+Button graphButtons[48];
+int numGraphButtons = 0;
 
 void triggerClickAnim(int type, int idx) {
   clickAnimType = type;
@@ -120,7 +131,7 @@ void save_state(void);
 void load_state(void);
 int isPrime(double val) {
   if (val != floor(val))
-    return 0; 
+    return 0;
   long n = (long)val;
   if (n <= 1)
     return 0;
@@ -134,25 +145,115 @@ int isPrime(double val) {
   }
   return 1;
 }
+// Expression Parser for Graphing
+typedef struct {
+  const char *ptr;
+} GraphParser;
+double parse_graph_expr(GraphParser *p, double xVal);
+double parse_graph_factor(GraphParser *p, double xVal) {
+  while (isspace(*p->ptr))
+    p->ptr++;
+  if (*p->ptr == '(') {
+    p->ptr++;
+    double val = parse_graph_expr(p, xVal);
+    if (*p->ptr == ')')
+      p->ptr++;
+    return val;
+  }
+  if (*p->ptr == 'x') {
+    p->ptr++;
+    return xVal;
+  }
+  if (strncmp(p->ptr, "sin", 3) == 0) {
+    p->ptr += 3;
+    return sin(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "cos", 3) == 0) {
+    p->ptr += 3;
+    return cos(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "tan", 3) == 0) {
+    p->ptr += 3;
+    return tan(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "sqrt", 4) == 0) {
+    p->ptr += 4;
+    return sqrt(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "log", 3) == 0) {
+    p->ptr += 3;
+    return log10(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "ln", 2) == 0) {
+    p->ptr += 2;
+    return log(parse_graph_factor(p, xVal));
+  }
+  if (isdigit(*p->ptr) || *p->ptr == '.') {
+    char *end;
+    double val = strtod(p->ptr, &end);
+    p->ptr = end;
+    return val;
+  }
+  return 0;
+}
+double parse_graph_term(GraphParser *p, double xVal) {
+  double val = parse_graph_factor(p, xVal);
+  while (isspace(*p->ptr))
+    p->ptr++;
+  while (*p->ptr == '*' || *p->ptr == '/' || *p->ptr == '^') {
+    char op = *p->ptr++;
+    double next = parse_graph_factor(p, xVal);
+    if (op == '*')
+      val *= next;
+    else if (op == '/')
+      val = (next != 0) ? val / next : 0;
+    else if (op == '^')
+      val = pow(val, next);
+    while (isspace(*p->ptr))
+      p->ptr++;
+  }
+  return val;
+}
+double parse_graph_expr(GraphParser *p, double xVal) {
+  double val = parse_graph_term(p, xVal);
+  while (isspace(*p->ptr))
+    p->ptr++;
+  while (*p->ptr == '+' || *p->ptr == '-') {
+    char op = *p->ptr++;
+    double next = parse_graph_term(p, xVal);
+    if (op == '+')
+      val += next;
+    else if (op == '-')
+      val -= next;
+    while (isspace(*p->ptr))
+      p->ptr++;
+  }
+  return val;
+}
+double evaluate_graph(const char *expr, double xVal) {
+  if (!expr || strlen(expr) == 0)
+    return 0;
+  GraphParser p = {expr};
+  return parse_graph_expr(&p, xVal);
+}
+
 void recordInput(const char *key) {
-  
+
   size_t len = strlen(inputSequence);
   size_t keyLen = strlen(key);
 
   if (len + keyLen >= sizeof(inputSequence) - 1) {
-    
+
     size_t shift = (len + keyLen) - (sizeof(inputSequence) - 2);
-    
+
     if (shift < len) {
-      memmove(inputSequence, inputSequence + shift,
-              len - shift + 1); 
+      memmove(inputSequence, inputSequence + shift, len - shift + 1);
     } else {
-      inputSequence[0] = '\0'; 
+      inputSequence[0] = '\0';
     }
   }
   strcat(inputSequence, key);
 
-  
   char *found = strstr(inputSequence, "CC==");
   if (found) {
     snprintf(specialMessage, sizeof(specialMessage), "HELLO :)");
@@ -196,10 +297,9 @@ NVGcolor hsvToRgb(float h, float s, float v) {
 
 void calc_inputDigit(const char *digit) {
   if (strcmp(digit, ".") == 0) {
-    
+
     if (strchr(calc.display, '.') != NULL) {
-      
-      
+
       if (!calc.clearOnNextDigit)
         return;
     }
@@ -212,10 +312,10 @@ void calc_inputDigit(const char *digit) {
       strcpy(calc.display, digit);
     }
     calc.clearOnNextDigit = 0;
-    isPrimeResult = 0; 
+    isPrimeResult = 0;
   } else if (strlen(calc.display) < 15) {
     strcat(calc.display, digit);
-    isPrimeResult = 0; 
+    isPrimeResult = 0;
   }
 }
 
@@ -230,10 +330,6 @@ void calc_inputConstant(const char *name) {
 
 void calc_inputUnit(const char *type) {
   double val = atof(calc.display);
-  
-  
-  
-  
 
   if (strcmp(type, "cm2in") == 0)
     val *= 0.393701;
@@ -256,7 +352,7 @@ void calc_inputUnit(const char *type) {
   calc.clearOnNextDigit = 1;
 }
 void calc_stackPush(double val) {
-  
+
   calc.stack[3] = calc.stack[2];
   calc.stack[2] = calc.stack[1];
   calc.stack[1] = calc.stack[0];
@@ -265,12 +361,11 @@ void calc_stackPush(double val) {
 
 double calc_stackPop() {
   double val = calc.stack[0];
-  
+
   calc.stack[0] = calc.stack[1];
   calc.stack[1] = calc.stack[2];
   calc.stack[2] = calc.stack[3];
-  
-  
+
   calc.stack[3] = 0;
   return val;
 }
@@ -283,14 +378,13 @@ void calc_inputRPN(const char *op) {
     double tmp = calc.stack[0];
     calc.stack[0] = calc.stack[1];
     calc.stack[1] = tmp;
-    
-    
+
     snprintf(calc.display, sizeof(calc.display), "%.10g", calc.stack[0]);
   } else if (strcmp(op, "DRP") == 0) {
     calc_stackPop();
     snprintf(calc.display, sizeof(calc.display), "%.10g", calc.stack[0]);
   } else if (strcmp(op, "CLR") == 0) {
-    
+
     for (int i = 0; i < 4; i++)
       calc.stack[i] = 0;
     snprintf(calc.display, sizeof(calc.display), "0");
@@ -321,14 +415,10 @@ void calc_inputUnary(const char *func) {
 }
 void calc_inputOperator(char op) {
   if (currentMode == MODE_RPN) {
-    
-    double x = atof(calc.display); 
-                                   
-    
-    
-    
 
-    double y = calc_stackPop(); 
+    double x = atof(calc.display);
+
+    double y = calc_stackPop();
 
     double res = 0;
     if (op == '+')
@@ -338,18 +428,16 @@ void calc_inputOperator(char op) {
     else if (op == '*')
       res = y * x;
     else if (op == '/')
-      res = (x != 0) ? y / x : 0; 
+      res = (x != 0) ? y / x : 0;
     else if (op == '^')
       res = pow(y, x);
 
-    
     calc_stackPush(res);
     snprintf(calc.display, sizeof(calc.display), "%.10g", res);
     calc.clearOnNextDigit = 1;
     return;
   }
 
-  
   if (calc.hasPendingOp) {
     calc_inputEquals();
   }
@@ -367,7 +455,7 @@ HistoryEntry history[8];
 int historyCount = 0;
 
 void addToHistory(const char *opA, char op, const char *opB, double result) {
-  
+
   if (historyCount == 8) {
     for (int i = 0; i < 7; i++) {
       history[i] = history[i + 1];
@@ -375,7 +463,6 @@ void addToHistory(const char *opA, char op, const char *opB, double result) {
     historyCount = 7;
   }
 
-  
   HistoryEntry *entry = &history[historyCount++];
   snprintf(entry->equation, sizeof(entry->equation), "%s %c %s =", opA, op,
            opB);
@@ -411,14 +498,14 @@ void calc_inputEquals(void) {
   case '/':
     if (current == 0) {
       divZeroCount++;
-      result = 0; 
+      result = 0;
       if (divZeroCount >= 1) {
         isCrashMode = 1;
         crashStartTime = SDL_GetTicks();
         SDL_SetWindowFullscreen(gWindow, SDL_WINDOW_FULLSCREEN_DESKTOP);
       }
     } else {
-      divZeroCount = 0; 
+      divZeroCount = 0;
       result = calc.storedValue / current;
     }
     break;
@@ -427,30 +514,25 @@ void calc_inputEquals(void) {
     break;
   }
 
-  
   char opA[32];
   snprintf(opA, sizeof(opA), "%g", calc.storedValue);
   addToHistory(opA, calc.pendingOp, calc.display, result);
-  save_state(); 
+  save_state();
 
   snprintf(calc.display, sizeof(calc.display), "%g", result);
   calc.hasPendingOp = 0;
   calc.clearOnNextDigit = 1;
 
-  
   isPrimeResult = isPrime(result);
 
-  
   if (fabs(result - 404) < 1e-9) {
     is404Mode = 1;
   }
 
-  
   if (fabs(result - 42) < 1e-9) {
     isDevMode = !isDevMode;
   }
 
-  
   if (fabs(lastResult - 9) < 1e-9 && calc.hasPendingOp == 0) {
     equalsCount++;
     if (equalsCount >= 2) {
@@ -471,8 +553,8 @@ void calc_inputClear(void) {
   calc.hasPendingOp = 0;
   calc.clearOnNextDigit = 0;
   isCrashMode = 0;
-  is404Mode = 0; 
-  
+  is404Mode = 0;
+
   if (currentMode == MODE_RPN) {
     for (int i = 0; i < 4; i++)
       calc.stack[i] = 0;
@@ -492,14 +574,12 @@ void formatNumber(const char *src, char *dest, size_t destSize) {
   int integerLen = dot ? (int)(dot - src) : (int)strlen(src);
   int isNegative = (src[0] == '-');
 
-  
   char intPart[64];
   int intIdx = 0;
 
   int srcIdx = integerLen - 1;
   int digitCount = 0;
 
-  
   while (srcIdx >= (isNegative ? 1 : 0)) {
     if (digitCount > 0 && digitCount % 3 == 0) {
       if (intIdx < 60)
@@ -515,13 +595,11 @@ void formatNumber(const char *src, char *dest, size_t destSize) {
       intPart[intIdx++] = '-';
   }
 
-  
   int destIdx = 0;
   for (int i = intIdx - 1; i >= 0 && destIdx < destSize - 1; i--) {
     dest[destIdx++] = intPart[i];
   }
 
-  
   if (dot) {
     int i = 0;
     while (dot[i] && destIdx < destSize - 1) {
@@ -529,7 +607,6 @@ void formatNumber(const char *src, char *dest, size_t destSize) {
     }
   }
 
-  
   dest[destIdx] = '\0';
 }
 Button histBtn;
@@ -539,17 +616,16 @@ unsigned char drawGrid[28][28] = {0};
 int isDrawing = 0;
 NeuralNetwork nn;
 int modelLoaded = 0;
-int predictedDigit = -1; 
-Uint32 lastDrawTime = 0;       
-int hasDrawnSomething = 0;     
-#define AUTO_PREDICT_DELAY 800 
+int predictedDigit = -1;
+Uint32 lastDrawTime = 0;
+int hasDrawnSomething = 0;
+#define AUTO_PREDICT_DELAY 800
 int predictDigit(void) {
   if (!modelLoaded) {
     printf("Model not loaded, cannot predict.\n");
     return -1;
   }
 
-  
   int minR = 28, maxR = -1;
   int minC = 28, maxC = -1;
 
@@ -568,44 +644,37 @@ int predictDigit(void) {
     }
   }
 
-  
   if (maxR == -1)
     return -1;
 
-  
   int w = maxC - minC + 1;
   int h = maxR - minR + 1;
 
-  
   float scale = 20.0f / (w > h ? w : h);
 
-  
   float scaled20[20][20];
   memset(scaled20, 0, sizeof(scaled20));
 
   int targetW = (int)(w * scale);
   int targetH = (int)(h * scale);
-  
+
   int offR = (20 - targetH) / 2;
   int offC = (20 - targetW) / 2;
 
   for (int r = 0; r < 20; r++) {
     for (int c = 0; c < 20; c++) {
-      
+
       if (r < offR || r >= offR + targetH || c < offC || c >= offC + targetW) {
         scaled20[r][c] = 0.0f;
         continue;
       }
 
-      
-      
       float srcR = (r - offR) / scale + minR;
       float srcC = (c - offC) / scale + minC;
 
       int r0 = (int)srcR;
       int c0 = (int)srcC;
 
-      
       if (r0 >= 0 && r0 < 27 && c0 >= 0 && c0 < 27) {
         float dr = srcR - r0;
         float dc = srcC - c0;
@@ -618,13 +687,12 @@ int predictDigit(void) {
         scaled20[r][c] = (1 - dr) * (1 - dc) * v00 + (1 - dr) * dc * v01 +
                          dr * (1 - dc) * v10 + dr * dc * v11;
       } else if (r0 >= 0 && r0 < 28 && c0 >= 0 && c0 < 28) {
-        
+
         scaled20[r][c] = (float)drawGrid[r0][c0];
       }
     }
   }
 
-  
   float sumMass = 0;
   float sumX = 0;
   float sumY = 0;
@@ -644,9 +712,6 @@ int predictDigit(void) {
     comY = sumY / sumMass;
   }
 
-  
-  
-  
   int shiftR = (int)roundf(9.5f - comY);
   int shiftC = (int)roundf(9.5f - comX);
 
@@ -663,7 +728,6 @@ int predictDigit(void) {
     }
   }
 
-  
   float input[784];
   for (int i = 0; i < 28; i++) {
     for (int j = 0; j < 28; j++) {
@@ -671,9 +735,6 @@ int predictDigit(void) {
     }
   }
 
-  
-  
-  
   static const int HEART_TEMPLATE[28][28] = {
       {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -746,15 +807,9 @@ int predictDigit(void) {
 
   if (union_val > 0) {
     float iou = intersection / union_val;
-    
-    
-    
-    
-    
-    
-    
+
     if (iou > 0.4) {
-      return -2; 
+      return -2;
     }
   }
 
@@ -763,13 +818,48 @@ int predictDigit(void) {
 float displayX, displayY, displayW, displayH;
 
 void updateLayout(int width, int height) {
+  winWidth = width;
+  winHeight = height;
+
+  if (currentMode == MODE_GRAPH) {
+    sidebarW = isSidebarExpanded ? 250 : 0;
+    sidebarX = 0;
+    sidebarY = 0;
+    sidebarH = height - 150;
+
+    keypadW = width;
+    keypadH = 150;
+    keypadX = 0;
+    keypadY = height - keypadH;
+
+    graphAreaX = sidebarW;
+    graphAreaY = 0;
+    graphAreaW = width - sidebarW;
+    graphAreaH = height - keypadH;
+
+    // Layout graph keypad buttons
+    int gRows = 4;
+    int gCols = 12;
+    float gBtnW = (float)keypadW / gCols;
+    float gBtnH = (float)keypadH / gRows;
+
+    for (int i = 0; i < numGraphButtons; i++) {
+      int r = i / gCols;
+      int c = i % gCols;
+      graphButtons[i].x = keypadX + c * gBtnW + 2;
+      graphButtons[i].y = keypadY + r * gBtnH + 2;
+      graphButtons[i].w = gBtnW - 4;
+      graphButtons[i].h = gBtnH - 4;
+    }
+    return;
+  }
+
   int sidebarWidth = (showHistory || currentMode == MODE_RPN) ? 200 : 0;
 
   if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
       currentMode == MODE_RPN) {
-    
+
   } else {
-    
   }
 
   int controlY = 80;
@@ -779,13 +869,11 @@ void updateLayout(int width, int height) {
   int calcWidth = width - ((showHistory || currentMode == MODE_RPN) ? 200 : 0);
   int padW = calcWidth - 40;
 
-  
   displayX = 20;
   displayY = 20;
   displayW = calcWidth - 40;
   displayH = 50;
 
-  
   for (int i = 0; i < numButtons; i++) {
     buttons[i].x = 0;
     buttons[i].y = 0;
@@ -816,7 +904,6 @@ void updateLayout(int width, int height) {
   int gap = 10;
   float ctrlBtnW = (float)(padW - gap * (numControl - 1)) / numControl;
 
-  
   modeBtn.x = 20;
   modeBtn.y = controlY;
   modeBtn.w = ctrlBtnW;
@@ -830,7 +917,6 @@ void updateLayout(int width, int height) {
   cBtn.w = ctrlBtnW;
   cBtn.h = controlH;
 
-  
   if (currentMode != MODE_DRAW && !showDraw) {
     for (int i = 0; i < numButtons; i++) {
       if (strcmp(buttons[i].label, "/") == 0) {
@@ -860,7 +946,6 @@ void updateLayout(int width, int height) {
     }
   }
 
-  
   int cols = (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
               currentMode == MODE_RPN)
                  ? 6
@@ -868,9 +953,9 @@ void updateLayout(int width, int height) {
   float bw = (float)(padW - gap * (cols - 1)) / cols;
 
   int padH = height - startY - 20;
-  
+
   if (padH < 50)
-    padH = 50; 
+    padH = 50;
   float bh = (float)(padH - 3 * gap) / 4;
 
   int colOffset = (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
@@ -879,13 +964,11 @@ void updateLayout(int width, int height) {
                       : 0;
   int startX = 20;
 
-  
   if (currentMode != MODE_DRAW && !showDraw) {
     for (int i = 0; i < numButtons; i++) {
       int r = -1, c = -1;
       char *l = buttons[i].label;
 
-      
       if (strcmp(l, "7") == 0) {
         r = 0;
         c = 0;
@@ -937,7 +1020,6 @@ void updateLayout(int width, int height) {
         buttons[i].h = bh;
       }
 
-      
       if (strcmp(l, "0") == 0) {
         buttons[i].x = startX + (0 + colOffset) * (bw + gap);
         buttons[i].y = startY + 3 * (bh + gap);
@@ -947,11 +1029,10 @@ void updateLayout(int width, int height) {
     }
   }
 
-  
   if (currentMode == MODE_SCIENTIFIC || currentMode == MODE_UNIT ||
       currentMode == MODE_RPN) {
     char *labels[4][2];
-    
+
     if (currentMode == MODE_SCIENTIFIC) {
       labels[0][0] = "sin";
       labels[0][1] = "sqrt";
@@ -970,7 +1051,7 @@ void updateLayout(int width, int height) {
       labels[2][1] = "mi2km";
       labels[3][0] = "C2F";
       labels[3][1] = "F2C";
-    } else { 
+    } else {
       labels[0][0] = "SWP";
       labels[0][1] = "DRP";
       labels[1][0] = "";
@@ -1002,7 +1083,7 @@ void initTheme() {
   theme_light.bg = nvgRGB(246, 247, 249);
   theme_light.display_bg = nvgRGB(246, 247, 249);
   theme_light.btn_bg_digit = nvgRGB(255, 255, 255);
-  theme_light.btn_bg_op = nvgRGB(230, 240, 255); 
+  theme_light.btn_bg_op = nvgRGB(230, 240, 255);
   theme_light.btn_bg_action = nvgRGB(220, 220, 225);
   theme_light.text_primary = nvgRGB(50, 50, 50);
   theme_light.text_secondary = nvgRGB(100, 100, 100);
@@ -1011,20 +1092,19 @@ void initTheme() {
   theme_dark.bg = nvgRGB(14, 15, 18);
   theme_dark.display_bg = nvgRGB(14, 15, 18);
   theme_dark.btn_bg_digit = nvgRGB(30, 32, 36);
-  theme_dark.btn_bg_op = nvgRGB(47, 128, 255); 
+  theme_dark.btn_bg_op = nvgRGB(47, 128, 255);
   theme_dark.btn_bg_action = nvgRGB(40, 42, 46);
   theme_dark.text_primary = nvgRGB(255, 255, 255);
   theme_dark.text_secondary = nvgRGB(150, 150, 150);
   theme_dark.shadow = nvgRGBA(0, 0, 0, 128);
 
-  current_theme = &theme_dark; 
+  current_theme = &theme_dark;
 }
 
 void initButtons(void) {
   initTheme();
   numButtons = 0;
 
-  
   int nums[3][3] = {{7, 8, 9}, {4, 5, 6}, {1, 2, 3}};
   for (int row = 0; row < 3; row++) {
     for (int col = 0; col < 3; col++) {
@@ -1035,25 +1115,21 @@ void initButtons(void) {
     }
   }
 
-  
   Button *b0 = &buttons[numButtons++];
   strcpy(b0->label, "0");
   b0->role = 0;
   b0->color = current_theme->btn_bg_digit;
 
-  
   Button *bdot = &buttons[numButtons++];
   strcpy(bdot->label, ".");
   bdot->role = 0;
   bdot->color = current_theme->btn_bg_digit;
 
-  
   Button *beq = &buttons[numButtons++];
   strcpy(beq->label, "=");
-  beq->role = 1; 
+  beq->role = 1;
   beq->color = current_theme->btn_bg_op;
 
-  
   char ops[4] = {'+', '-', '*', '/'};
   for (int i = 0; i < 4; i++) {
     Button *bop = &buttons[numButtons++];
@@ -1062,38 +1138,32 @@ void initButtons(void) {
     bop->color = current_theme->btn_bg_op;
   }
 
-  
   strcpy(cBtn.label, "C");
-  cBtn.role = 2; 
+  cBtn.role = 2;
   cBtn.color = current_theme->btn_bg_action;
 
-  
   strcpy(histBtn.label, "H");
   histBtn.role = 2;
   histBtn.color = current_theme->btn_bg_action;
 
-  
   strcpy(drawBtn.label, "DRAW");
   drawBtn.role = 2;
   drawBtn.color = current_theme->btn_bg_action;
 
-  
   strcpy(modeBtn.label, "M");
   modeBtn.role = 2;
   modeBtn.color = current_theme->btn_bg_action;
 
-  
   if (numButtons < 30) {
     char *sciLabels[] = {"sin",  "cos", "tan", "log", "ln",
                          "sqrt", "sqr", "x^y", "PI",  "e"};
     for (int i = 0; i < 10; i++) {
       Button *b = &buttons[numButtons++];
       strcpy(b->label, sciLabels[i]);
-      b->role = 2; 
+      b->role = 2;
       b->color = current_theme->btn_bg_action;
     }
 
-    
     char *unitLabels[] = {"cm2in", "in2cm", "kg2lb", "lb2kg",
                           "km2mi", "mi2km", "C2F",   "F2C"};
     for (int i = 0; i < 8; i++) {
@@ -1103,7 +1173,6 @@ void initButtons(void) {
       b->color = current_theme->btn_bg_action;
     }
 
-    
     char *rpnLabels[] = {"SWP", "DRP"};
     for (int i = 0; i < 2; i++) {
       Button *b = &buttons[numButtons++];
@@ -1113,7 +1182,23 @@ void initButtons(void) {
     }
   }
 
-  updateLayout(232, 306);
+  // Init Graph Buttons
+  char *graphLabels[] = {
+      "x",   "y",   "a²",  "aⁿ",  "7",  "8", "9", "/", "func", "<",    ">",
+      "CLR", "(",   ")",   "<",   ">",  "4", "5", "6", "*",    "bksp", "←",
+      "→",   "ENT", "|a|", ",",   "≤",  "≥", "1", "2", "3",    "-",    "",
+      "",    "",    "",    "ABC", "sm", "√", "π", "0", ".",    "=",    "+"};
+  numGraphButtons = 0;
+  for (int i = 0; i < 44; i++) {
+    Button *b = &graphButtons[numGraphButtons++];
+    strcpy(b->label, graphLabels[i]);
+    b->role = (i % 12 >= 4 && i % 12 <= 6) ? 0 : (i % 12 == 7 ? 1 : 2);
+    b->color = (b->role == 0)   ? current_theme->btn_bg_digit
+               : (b->role == 1) ? current_theme->btn_bg_op
+                                : current_theme->btn_bg_action;
+  }
+
+  updateLayout(winWidth, winHeight);
 }
 
 void handleButtonClick(int x, int y) {
@@ -1121,66 +1206,60 @@ void handleButtonClick(int x, int y) {
   int w, h;
   SDL_GetWindowSize(win, &w, &h);
 
-  
   if (x >= histBtn.x && x < histBtn.x + histBtn.w && y >= histBtn.y &&
       y < histBtn.y + histBtn.h) {
     showHistory = !showHistory;
     if (showHistory)
-      showDraw = 0; 
-    SDL_SetWindowSize(win, showHistory ? w + 200 : w - 200,
-                      h); 
-    updateLayout(showHistory ? w + 200 : w - 200, h); 
+      showDraw = 0;
+    SDL_SetWindowSize(win, showHistory ? w + 200 : w - 200, h);
+    updateLayout(showHistory ? w + 200 : w - 200, h);
     triggerClickAnim(2, 0);
     return;
   }
 
-  
   if (x >= modeBtn.x && x < modeBtn.x + modeBtn.w && y >= modeBtn.y &&
       y < modeBtn.y + modeBtn.h) {
     isDropdownOpen = !isDropdownOpen;
     return;
   }
 
-  
   if (isDropdownOpen) {
-    
-    
+
     float rx = modeBtn.x;
     float ry = modeBtn.y;
     float rw = modeBtn.w;
     float rh = modeBtn.h;
     int itemH = 30;
 
-    
     if (x >= rx && x < rx + 100 && y >= ry + rh && y < ry + rh + itemH) {
       currentMode = MODE_BASIC;
       isDropdownOpen = 0;
-      showDraw = 0;                   
-      SDL_SetWindowSize(win, 300, h); 
+      showDraw = 0;
+      SDL_SetWindowSize(win, 300, h);
       updateLayout(300, h);
       return;
     }
-    
+
     if (x >= rx && x < rx + 100 && y >= ry + rh + itemH &&
         y < ry + rh + 2 * itemH) {
       currentMode = MODE_SCIENTIFIC;
       isDropdownOpen = 0;
       showDraw = 0;
-      SDL_SetWindowSize(win, 450, h); 
+      SDL_SetWindowSize(win, 450, h);
       updateLayout(450, h);
       return;
     }
-    
+
     if (x >= rx && x < rx + 100 && y >= ry + rh + 2 * itemH &&
         y < ry + rh + 3 * itemH) {
       currentMode = MODE_UNIT;
       isDropdownOpen = 0;
       showDraw = 0;
-      SDL_SetWindowSize(win, 450, h); 
+      SDL_SetWindowSize(win, 450, h);
       updateLayout(450, h);
       return;
     }
-    
+
     if (x >= rx && x < rx + 100 && y >= ry + rh + 3 * itemH &&
         y < ry + rh + 4 * itemH) {
       currentMode = MODE_RPN;
@@ -1190,24 +1269,63 @@ void handleButtonClick(int x, int y) {
       updateLayout(650, h);
       return;
     }
-    
+
     if (x >= rx && x < rx + 100 && y >= ry + rh + 4 * itemH &&
         y < ry + rh + 5 * itemH) {
-      currentMode = MODE_DRAW; 
+      currentMode = MODE_DRAW;
       showDraw = 1;
       showHistory = 0;
       isDropdownOpen = 0;
-      SDL_SetWindowSize(win, 300, h); 
-      updateLayout(300, h);           
+      SDL_SetWindowSize(win, 300, h);
+      updateLayout(300, h);
       return;
     }
 
-    
+    if (x >= rx && x < rx + 100 && y >= ry + rh + 5 * itemH &&
+        y < ry + rh + 6 * itemH) {
+      currentMode = MODE_GRAPH;
+      showDraw = 0;
+      showHistory = 0;
+      isDropdownOpen = 0;
+      SDL_SetWindowSize(win, 1000, 500);
+      updateLayout(1000, 500);
+      return;
+    }
+
     isDropdownOpen = 0;
     return;
   }
 
-  
+  if (currentMode == MODE_GRAPH) {
+    // Handle Sidebar toggle
+    if (x > sidebarX + sidebarW - 40 && x < sidebarX + sidebarW && y < 50) {
+      isSidebarExpanded = !isSidebarExpanded;
+      updateLayout(w, h);
+      return;
+    }
+
+    // Handle graph buttons
+    for (int i = 0; i < numGraphButtons; i++) {
+      Button *b = &graphButtons[i];
+      if (x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h) {
+        if (strcmp(b->label, "CLR") == 0) {
+          graphEq[0] = '\0';
+        } else if (strcmp(b->label, "bksp") == 0) {
+          int len = strlen(graphEq);
+          if (len > 0)
+            graphEq[len - 1] = '\0';
+        } else if (strcmp(b->label, "ENT") == 0) {
+          // Re-render handled by main loop
+        } else if (strlen(b->label) > 0) {
+          strncat(graphEq, b->label, sizeof(graphEq) - strlen(graphEq) - 1);
+        }
+        triggerClickAnim(5, i);
+        return;
+      }
+    }
+    return;
+  }
+
   if (x >= cBtn.x && x < cBtn.x + cBtn.w && y >= cBtn.y &&
       y < cBtn.y + cBtn.h) {
     recordInput("C");
@@ -1217,37 +1335,33 @@ void handleButtonClick(int x, int y) {
     return;
   }
 
-  
-  
   if (showDraw || currentMode == MODE_DRAW) {
     int calcWidth = showHistory ? w - 200 : w;
-    int gridStartY = 120; 
+    int gridStartY = 120;
 
-    int reservedBottom = 50; 
+    int reservedBottom = 50;
     int padH = h - gridStartY - 20 - reservedBottom;
     int padW = calcWidth - 40;
     if (padH < 100)
-      padH = 100; 
+      padH = 100;
 
     int cellSize = (padW < padH ? padW : padH) / 28;
     int gridSize = 28 * cellSize;
     int gridX = 20 + (padW - gridSize) / 2;
     int gridY = gridStartY + (padH - gridSize) / 2;
 
-    
-    
     int numDrBtns = 5;
     char *drLabels[] = {"+", "-", "*", "/", "CLR"};
     int gap = 10;
     int totalGap = (numDrBtns - 1) * gap;
-    int availW = padW; 
+    int availW = padW;
     int btnW = (availW - totalGap) / numDrBtns;
     int btnH = 30;
-    int btnY = gridStartY + padH + 10; 
+    int btnY = gridStartY + padH + 10;
     int startBtnX = 20;
 
     for (int i = 0; i < numDrBtns; i++) {
-      
+
       int bx = startBtnX + i * (btnW + gap);
       int by = btnY;
       int bw = btnW;
@@ -1264,30 +1378,28 @@ void handleButtonClick(int x, int y) {
           hasDrawnSomething = 0;
           return;
         } else {
-          
+
           calc_inputOperator(drLabels[i][0]);
           return;
         }
       }
     }
 
-    
     if (x >= gridX && x < gridX + gridSize && y >= gridY &&
         y < gridY + gridSize) {
       int col = (x - gridX) / cellSize;
       int row = (y - gridY) / cellSize;
       if (col >= 0 && col < 28 && row >= 0 && row < 28) {
-        drawGrid[row][col] = 1;        
-        isDrawing = 1;                 
-        lastDrawTime = SDL_GetTicks(); 
-        hasDrawnSomething = 1;         
+        drawGrid[row][col] = 1;
+        isDrawing = 1;
+        lastDrawTime = SDL_GetTicks();
+        hasDrawnSomething = 1;
       }
       return;
     }
-    return; 
+    return;
   }
 
-  
   if (showHistory) {
     if (x > w - 200) {
       int startY = 20;
@@ -1300,10 +1412,9 @@ void handleButtonClick(int x, int y) {
     }
   }
 
-  
   for (int i = 0; i < numButtons; i++) {
     Button *b = &buttons[i];
-    
+
     if (b->w > 0 && b->h > 0 && x >= b->x && x < b->x + b->w && y >= b->y &&
         y < b->y + b->h) {
       char *label = b->label;
@@ -1314,7 +1425,7 @@ void handleButtonClick(int x, int y) {
                  label[0] == '/' || label[0] == '^') {
         recordInput(label);
         calc_inputOperator(label[0]);
-      } else if (strcmp(label, "=") == 0) { 
+      } else if (strcmp(label, "=") == 0) {
         recordInput("=");
         isEqualsDown = 1;
         equalsPressTime = SDL_GetTicks();
@@ -1326,7 +1437,7 @@ void handleButtonClick(int x, int y) {
       } else if (strcmp(label, ".") == 0) {
         recordInput(".");
         calc_inputDigit(".");
-      } else if (strcmp(label, "ENT") == 0) { 
+      } else if (strcmp(label, "ENT") == 0) {
         recordInput(label);
         calc_inputRPN("ENT");
       } else if (strcmp(label, "sin") == 0 || strcmp(label, "cos") == 0 ||
@@ -1355,7 +1466,7 @@ void handleButtonClick(int x, int y) {
 }
 
 void handleKeyboard(SDL_Keycode key) {
-  
+
   int konamiPattern[KONAMI_LENGTH] = {
       SDLK_UP,    SDLK_UP,   SDLK_DOWN,  SDLK_DOWN, SDLK_LEFT,
       SDLK_RIGHT, SDLK_LEFT, SDLK_RIGHT, SDLK_b,    SDLK_a};
@@ -1366,43 +1477,39 @@ void handleKeyboard(SDL_Keycode key) {
     if (konamiIndex == KONAMI_LENGTH) {
       isRainbowMode = !isRainbowMode;
       konamiIndex = 0;
-      return; 
+      return;
     }
   } else if (key == konamiPattern[0]) {
     konamiIndex = 1;
     konamiSequence[0] = key;
   } else if (key != SDLK_UP && key != SDLK_DOWN && key != SDLK_LEFT &&
              key != SDLK_RIGHT && key != SDLK_b && key != SDLK_a) {
-    
+
     konamiIndex = 0;
   }
 
   if (currentMode == MODE_DRAW) {
-    
+
     return;
   }
 
-  
   if (key >= SDLK_0 && key <= SDLK_9) {
     char digit[2] = {(char)key, '\0'};
     calc_inputDigit(digit);
     return;
   }
 
-  
   if (key >= SDLK_KP_0 && key <= SDLK_KP_9) {
     char digit[2] = {(char)('0' + (key - SDLK_KP_0)), '\0'};
     calc_inputDigit(digit);
     return;
   }
 
-  
   if (key == SDLK_PERIOD || key == SDLK_KP_PERIOD) {
     calc_inputDigit(".");
     return;
   }
 
-  
   switch (key) {
   case SDLK_PLUS:
   case SDLK_KP_PLUS:
@@ -1420,7 +1527,7 @@ void handleKeyboard(SDL_Keycode key) {
   case SDLK_KP_DIVIDE:
     calc_inputOperator('/');
     break;
-  case SDLK_CARET: 
+  case SDLK_CARET:
     calc_inputOperator('^');
     break;
   case SDLK_EQUALS:
@@ -1437,7 +1544,7 @@ void handleKeyboard(SDL_Keycode key) {
   case SDLK_ESCAPE:
     recordInput("C");
     calc_inputClear();
-    specialMessage[0] = '\0'; 
+    specialMessage[0] = '\0';
     break;
   case SDLK_BACKSPACE:
     calc_inputBackspace();
@@ -1453,7 +1560,7 @@ void ui_handle_mouse_move(int x, int y) {
       b->is_hovered = 0;
     }
   }
-  
+
   Button *globals[] = {&modeBtn, &histBtn, &cBtn};
   for (int i = 0; i < 3; i++) {
     Button *b = globals[i];
@@ -1465,29 +1572,27 @@ void ui_handle_mouse_move(int x, int y) {
   }
 }
 void ui_init_nanovg(void) {
-  
+
   vg = nvgCreateGL3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
   if (vg == NULL) {
     printf("Could not init nanovg.\n");
     exit(1);
   }
-  
+
 #ifdef __APPLE__
   fontNormal = nvgCreateFont(vg, "sans", "/System/Library/Fonts/Helvetica.ttc");
   fontBold =
       nvgCreateFont(vg, "sans-bold", "/System/Library/Fonts/Helvetica.ttc");
 #else
-  
-  
+
   fontNormal = nvgCreateFont(vg, "sans",
                              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
   if (fontNormal == -1) {
-    
+
     fontNormal = nvgCreateFont(
         vg, "sans", "/usr/share/fonts/truetype/freefont/FreeSans.ttf");
   }
 
-  
   fontBold = fontNormal;
 #endif
 
@@ -1497,7 +1602,7 @@ void ui_init_nanovg(void) {
 }
 void draw_rrect_shadow(NVGcontext *vg, float x, float y, float w, float h,
                        float rad, NVGcolor bg, NVGcolor shadow) {
-  
+
   NVGpaint shadowPaint =
       nvgBoxGradient(vg, x, y + 2, w, h, rad, 10, shadow, nvgRGBA(0, 0, 0, 0));
   nvgBeginPath(vg);
@@ -1507,7 +1612,6 @@ void draw_rrect_shadow(NVGcontext *vg, float x, float y, float w, float h,
   nvgFillPaint(vg, shadowPaint);
   nvgFill(vg);
 
-  
   nvgBeginPath(vg);
   nvgRoundedRect(vg, x, y, w, h, rad);
   nvgFillColor(vg, bg);
@@ -1516,10 +1620,10 @@ void draw_rrect_shadow(NVGcontext *vg, float x, float y, float w, float h,
 }
 
 void draw_crash_screen(NVGcontext *vg, int w, int h) {
-  
+
   nvgBeginPath(vg);
   nvgRect(vg, 0, 0, w, h);
-  nvgFillColor(vg, nvgRGB(0, 0, 150)); 
+  nvgFillColor(vg, nvgRGB(0, 0, 150));
   nvgFill(vg);
 
   nvgFillColor(vg, nvgRGB(255, 255, 255));
@@ -1535,29 +1639,114 @@ void draw_crash_screen(NVGcontext *vg, int w, int h) {
   nvgText(vg, w / 2, h / 2 + 80, "Error: DIVIDE_BY_ZERO", NULL);
 }
 void draw_404_screen(NVGcontext *vg, int w, int h) {
-  
+
   nvgBeginPath(vg);
   nvgRect(vg, 0, 0, w, h);
-  nvgFillColor(vg, nvgRGB(0, 0, 0)); 
+  nvgFillColor(vg, nvgRGB(0, 0, 0));
   nvgFill(vg);
 
-  nvgFillColor(
-      vg, nvgRGB(255, 0,
-                 0)); 
+  nvgFillColor(vg, nvgRGB(255, 0, 0));
   nvgFillColor(vg, nvgRGB(255, 255, 255));
 
-  nvgFontSize(vg, 80); 
+  nvgFontSize(vg, 80);
   nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
   nvgText(vg, w / 2, h / 2 - 20, "404", NULL);
 
   nvgFontSize(vg, 30);
   nvgText(vg, w / 2, h / 2 + 30, "NOT FOUND", NULL);
 }
+void draw_graph_grid(NVGcontext *vg, float x, float y, float w, float h) {
+  nvgSave(vg);
+  nvgScissor(vg, x, y, w, h);
+
+  // Background
+  nvgBeginPath(vg);
+  nvgRect(vg, x, y, w, h);
+  nvgFillColor(vg, current_theme->bg);
+  nvgFill(vg);
+
+  float midX = x + w / 2.0f;
+  float midY = y + h / 2.0f;
+  float scaleX = w / (xMax - xMin);
+  float scaleY = h / (yMax - yMin);
+
+  // Grid lines
+  nvgStrokeWidth(vg, 1.0f);
+  nvgStrokeColor(vg, nvgRGBA(128, 128, 128, 50));
+  for (float i = ceil(xMin); i <= floor(xMax); i += 1.0f) {
+    float px = x + (i - xMin) * scaleX;
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, px, y);
+    nvgLineTo(vg, px, y + h);
+    nvgStroke(vg);
+  }
+  for (float j = ceil(yMin); j <= floor(yMax); j += 1.0f) {
+    float py = y + h - (j - yMin) * scaleY;
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, x, py);
+    nvgLineTo(vg, x + w, py);
+    nvgStroke(vg);
+  }
+
+  // Axes
+  nvgStrokeWidth(vg, 2.0f);
+  nvgStrokeColor(vg, current_theme->text_primary);
+  float zeroX = x + (0 - xMin) * scaleX;
+  float zeroY = y + h - (0 - yMin) * scaleY;
+
+  if (zeroX >= x && zeroX <= x + w) {
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, zeroX, y);
+    nvgLineTo(vg, zeroX, y + h);
+    nvgStroke(vg);
+  }
+  if (zeroY >= y && zeroY <= y + h) {
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, x, zeroY);
+    nvgLineTo(vg, x + w, zeroY);
+    nvgStroke(vg);
+  }
+
+  nvgRestore(vg);
+}
+
+void draw_graph_curve(NVGcontext *vg, float x, float y, float w, float h) {
+  if (strlen(graphEq) == 0)
+    return;
+
+  nvgSave(vg);
+  nvgScissor(vg, x, y, w, h);
+
+  nvgBeginPath(vg);
+  nvgStrokeWidth(vg, 3.0f);
+  nvgStrokeColor(vg, nvgRGB(47, 128, 255)); // Blue curve
+
+  float scaleX = w / (xMax - xMin);
+  float scaleY = h / (yMax - yMin);
+
+  int first = 1;
+  for (int i = 0; i <= w; i++) {
+    float xv = xMin + (float)i / w * (xMax - xMin);
+    float yv = (float)evaluate_graph(graphEq, xv);
+
+    float px = x + i;
+    float py = y + h - (yv - yMin) * scaleY;
+
+    if (first) {
+      nvgMoveTo(vg, px, py);
+      first = 0;
+    } else {
+      nvgLineTo(vg, px, py);
+    }
+  }
+  nvgStroke(vg);
+  nvgRestore(vg);
+}
+
 void draw_button_render(NVGcontext *vg, Button *b, float dt) {
   if (b->w <= 0)
     return;
 
-  
   if (b->is_hovered) {
     b->anim_t += dt * 5.0f;
     if (b->anim_t > 1.0f)
@@ -1572,12 +1761,10 @@ void draw_button_render(NVGcontext *vg, Button *b, float dt) {
   if (b->role == 1)
     c = current_theme->btn_bg_op;
 
-  
   if (isRainbowMode) {
     c = hsvToRgb(rainbowHue, 0.7f, 0.8f);
   }
 
-  
   if (b->anim_t > 0) {
     c.r += b->anim_t * 0.1f;
     c.g += b->anim_t * 0.1f;
@@ -1590,7 +1777,6 @@ void draw_button_render(NVGcontext *vg, Button *b, float dt) {
   if (b->role == 1 && current_theme == &theme_dark)
     nvgFillColor(vg, nvgRGB(255, 255, 255));
 
-  
   float fsize = b->h * 0.5f;
   if (fsize < 18)
     fsize = 18;
@@ -1602,166 +1788,189 @@ void draw_button_render(NVGcontext *vg, Button *b, float dt) {
   nvgText(vg, b->x + b->w / 2, b->y + b->h / 2, b->label, NULL);
 }
 
+void draw_graph_sidebar(NVGcontext *vg, float x, float y, float w, float h) {
+  if (w <= 0)
+    return;
+
+  nvgBeginPath(vg);
+  nvgRect(vg, x, y, w, h);
+  nvgFillColor(vg, current_theme->btn_bg_action);
+  nvgFill(vg);
+
+  // Expression input box
+  float boxX = x + 10;
+  float boxY = y + 50;
+  float boxW = w - 20;
+  float boxH = 40;
+
+  nvgBeginPath(vg);
+  nvgRoundedRect(vg, boxX, boxY, boxW, boxH, 5);
+  nvgFillColor(vg, current_theme->display_bg);
+  nvgFill(vg);
+  nvgStrokeColor(vg, nvgRGB(47, 128, 255));
+  nvgStroke(vg);
+
+  nvgFillColor(vg, current_theme->text_primary);
+  nvgFontSize(vg, 18);
+  nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+  nvgText(vg, boxX + 10, boxY + boxH / 2, graphEq, NULL);
+
+  // Sidebar Title
+  nvgFontSize(vg, 20);
+  nvgText(vg, x + 10, y + 30, "Expressions", NULL);
+
+  // Toggle Icon
+  nvgFontSize(vg, 18);
+  nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+  nvgText(vg, x + w - 10, y + 30, isSidebarExpanded ? "<<" : ">>", NULL);
+}
+
+void draw_graph_keypad(NVGcontext *vg, float x, float y, float w, float h) {
+  for (int i = 0; i < numGraphButtons; i++) {
+    draw_button_render(vg, &graphButtons[i], 0);
+  }
+}
+
 void ui_render(SDL_Window *win) {
   int w, h;
   SDL_GetWindowSize(win, &w, &h);
   int winWidth, winHeight;
-  SDL_GL_GetDrawableSize(win, &winWidth, &winHeight); 
+  SDL_GL_GetDrawableSize(win, &winWidth, &winHeight);
   float pxRatio = (float)winWidth / (float)w;
 
   static int lastW = 0, lastH = 0;
   if (w != lastW || h != lastH) {
-    updateLayout(w, h); 
+    updateLayout(w, h);
     lastW = w;
     lastH = h;
   }
 
   nvgBeginFrame(vg, w, h, pxRatio);
 
-  
   if (is404Mode) {
     draw_404_screen(vg, w, h);
     nvgEndFrame(vg);
     return;
   }
 
-  
   nvgBeginPath(vg);
   nvgRect(vg, 0, 0, w, h);
   nvgFillColor(vg, current_theme->bg);
   nvgFill(vg);
 
-  
-  if (showHistory || currentMode == MODE_RPN) {
+  if (currentMode == MODE_GRAPH) {
+    draw_graph_grid(vg, graphAreaX, graphAreaY, graphAreaW, graphAreaH);
+    draw_graph_curve(vg, graphAreaX, graphAreaY, graphAreaW, graphAreaH);
+    draw_graph_sidebar(vg, sidebarX, sidebarY, sidebarW, sidebarH);
+    draw_graph_keypad(vg, keypadX, keypadY, keypadW, keypadH);
+
+    // Dropdown toggle button still needs to be drawn
+    draw_button_render(vg, &modeBtn, 0.016f);
+  } else {
+    if (showHistory || currentMode == MODE_RPN) {
+      nvgBeginPath(vg);
+      nvgRect(vg, w - 200, 0, 200, h);
+      nvgFillColor(vg, nvgRGB(40, 40, 40));
+      nvgFill(vg);
+
+      nvgFillColor(vg, nvgRGB(200, 200, 200));
+      nvgFontSize(vg, 16);
+      nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+
+      if (currentMode == MODE_RPN) {
+        for (int i = 0; i < 4; i++) {
+          char buf[64];
+          snprintf(buf, sizeof(buf), "%d: %.5g", i, calc.stack[i]);
+          nvgText(vg, w - 190, h - 100 - i * 50, buf, NULL);
+        }
+      } else {
+        for (int i = 0; i < historyCount; i++) {
+          nvgText(vg, w - 190, 30 + i * 40, history[i].equation, NULL);
+          char res[64];
+          snprintf(res, sizeof(res), "= %.5g", history[i].result);
+          nvgText(vg, w - 190, 50 + i * 40, res, NULL);
+        }
+      }
+    }
+
     nvgBeginPath(vg);
-    nvgRect(vg, w - 200, 0, 200, h);
-    nvgFillColor(vg,
-                 nvgRGB(40, 40, 40)); 
+    nvgRoundedRect(vg, displayX, displayY, displayW, displayH, 10);
+    nvgFillColor(vg, current_theme->display_bg);
     nvgFill(vg);
 
-    
-    
-    nvgFillColor(vg, nvgRGB(200, 200, 200));
-    nvgFontSize(vg, 16);
-    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-
-    if (currentMode == MODE_RPN) {
-      for (int i = 0; i < 4; i++) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%d: %.5g", i, calc.stack[i]);
-        nvgText(vg, w - 190, h - 100 - i * 50, buf, NULL);
-      }
+    char formattedText[64];
+    if (strlen(specialMessage) > 0) {
+      snprintf(formattedText, sizeof(formattedText), "%s", specialMessage);
+    } else if (isEqualsDown && SDL_GetTicks() - equalsPressTime > 2000) {
+      snprintf(formattedText, sizeof(formattedText), "why are you holding me");
     } else {
-      for (int i = 0; i < historyCount; i++) {
-        nvgText(vg, w - 190, 30 + i * 40, history[i].equation, NULL);
-        char res[64];
-        snprintf(res, sizeof(res), "= %.5g", history[i].result);
-        nvgText(vg, w - 190, 50 + i * 40, res, NULL);
+      formatNumber(calc.display, formattedText, sizeof(formattedText));
+      double val = atof(calc.display);
+      if (fabs(val - 80085) < 1e-9)
+        snprintf(formattedText, sizeof(formattedText), "BOOBS");
+      else if (fabs(val - 69) < 1e-9)
+        snprintf(formattedText, sizeof(formattedText), "NICE");
+      else if (fabs(val - 420) < 1e-9)
+        snprintf(formattedText, sizeof(formattedText), "BLAZE IT");
+      else if (fabs(val - 1337) < 1e-9)
+        snprintf(formattedText, sizeof(formattedText), "LEET");
+    }
+
+    nvgFillColor(vg, current_theme->text_primary);
+    float dispFont = h * 0.08f;
+    if (dispFont < 36)
+      dispFont = 36;
+    if (dispFont > 80)
+      dispFont = 80;
+    nvgFontSize(vg, dispFont);
+
+    float bounds[4];
+    nvgTextBounds(vg, 0, 0, formattedText, NULL, bounds);
+    float textW = bounds[2] - bounds[0];
+    float maxW = displayW - 20;
+    if (textW > maxW) {
+      dispFont *= (maxW / textW);
+      if (dispFont < 12)
+        dispFont = 12;
+      nvgFontSize(vg, dispFont);
+    }
+
+    nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+    nvgText(vg, displayX + displayW - 10, displayY + 25, formattedText, NULL);
+
+    if (isPrimeResult) {
+      nvgBeginPath(vg);
+      nvgFillColor(vg, nvgRGB(255, 215, 0));
+      nvgFontSize(vg, 12);
+      nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+      nvgText(vg, displayX + 10, displayY + 5, "PRIME", NULL);
+    }
+
+    float dt = 0.016f;
+    for (int i = 0; i < numButtons; i++) {
+      if (strcmp(buttons[i].label, "=") == 0 ||
+          strcmp(buttons[i].label, "ENT") == 0) {
+        if (currentMode == MODE_RPN)
+          strcpy(buttons[i].label, "ENT");
+        else
+          strcpy(buttons[i].label, "=");
       }
     }
-  }
 
-  
-  
-  nvgBeginPath(vg);
-  nvgRoundedRect(vg, displayX, displayY, displayW, displayH, 10);
-  nvgFillColor(vg, current_theme->display_bg);
-  nvgFill(vg);
-  
+    draw_button_render(vg, &modeBtn, dt);
+    draw_button_render(vg, &histBtn, dt);
+    draw_button_render(vg, &cBtn, dt);
 
-  
-  char formattedText[64];
-
-  
-  if (strlen(specialMessage) > 0) {
-    
-    snprintf(formattedText, sizeof(formattedText), "%s", specialMessage);
-  } else if (isEqualsDown && SDL_GetTicks() - equalsPressTime > 2000) {
-    
-    snprintf(formattedText, sizeof(formattedText), "why are you holding me");
-  } else {
-    
-    formatNumber(calc.display, formattedText, sizeof(formattedText));
-
-    
-    double val = atof(calc.display);
-    
-    if (fabs(val - 80085) < 1e-9) {
-      snprintf(formattedText, sizeof(formattedText), "BOOBS");
-    } else if (fabs(val - 69) < 1e-9) {
-      snprintf(formattedText, sizeof(formattedText), "NICE");
-    } else if (fabs(val - 420) < 1e-9) {
-      snprintf(formattedText, sizeof(formattedText), "BLAZE IT");
-    } else if (fabs(val - 1337) < 1e-9) {
-      snprintf(formattedText, sizeof(formattedText), "LEET");
+    for (int i = 0; i < numButtons; i++) {
+      draw_button_render(vg, &buttons[i], dt);
     }
   }
 
-  nvgFillColor(vg, current_theme->text_primary);
-
-  
-  float dispFont = h * 0.08f;
-  if (dispFont < 36)
-    dispFont = 36;
-  if (dispFont > 80)
-    dispFont = 80;
-
-  nvgFontSize(vg, dispFont);
-  
-  float bounds[4];
-  nvgTextBounds(vg, 0, 0, formattedText, NULL, bounds);
-  float textW = bounds[2] - bounds[0];
-  float maxW = displayW - 20; 
-
-  if (textW > maxW) {
-    dispFont *= (maxW / textW);
-    
-    if (dispFont < 12)
-      dispFont = 12;
-    nvgFontSize(vg, dispFont);
-  }
-
-  nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-  nvgText(vg, displayX + displayW - 10, displayY + 25, formattedText, NULL);
-
-  
-  if (isPrimeResult) {
-    nvgBeginPath(vg);
-    nvgFillColor(vg, nvgRGB(255, 215, 0)); 
-    nvgFontSize(vg, 12);
-    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-    nvgText(vg, displayX + 10, displayY + 5, "PRIME", NULL);
-  }
-
-  
-  float dt = 0.016f; 
-
-  
-  for (int i = 0; i < numButtons; i++) {
-    if (strcmp(buttons[i].label, "=") == 0 ||
-        strcmp(buttons[i].label, "ENT") == 0) {
-      if (currentMode == MODE_RPN)
-        strcpy(buttons[i].label, "ENT");
-      else
-        strcpy(buttons[i].label, "=");
-    }
-  }
-
-  
-  draw_button_render(vg, &modeBtn, dt);
-  draw_button_render(vg, &histBtn, dt);
-  draw_button_render(vg, &cBtn, dt);
-
-  for (int i = 0; i < numButtons; i++) {
-    draw_button_render(vg, &buttons[i], dt);
-  }
-
-  
   if (isDropdownOpen) {
     float rx = modeBtn.x;
     float ry = modeBtn.y + modeBtn.h + 5;
-    float Rw = 120, Rh = 150;
-    
+    float Rw = 120, Rh = 180;
+
     draw_rrect_shadow(vg, rx, ry, Rw, Rh, 5, nvgRGB(50, 50, 50),
                       nvgRGBA(0, 0, 0, 100));
 
@@ -1772,16 +1981,11 @@ void ui_render(SDL_Window *win) {
     nvgText(vg, rx + 10, ry + 80, "Unit", NULL);
     nvgText(vg, rx + 10, ry + 110, "RPN", NULL);
     nvgText(vg, rx + 10, ry + 140, "Draw", NULL);
+    nvgText(vg, rx + 10, ry + 170, "Graphing", NULL);
   }
 
-  
   if (showDraw || currentMode == MODE_DRAW) {
-    
-    
-    
-    
 
-    
     int calcWidth = showHistory ? w - 200 : w;
     int gridStartY = 120;
     int padH = h - gridStartY - 70;
@@ -1810,7 +2014,6 @@ void ui_render(SDL_Window *win) {
       }
     }
 
-    
     int numDrBtns = 5;
     char *drLabels[] = {"+", "-", "*", "/", "CLR"};
     int gap = 10;
@@ -1823,19 +2026,18 @@ void ui_render(SDL_Window *win) {
 
     for (int i = 0; i < numDrBtns; i++) {
       Button b;
-      
+
       b.x = startBtnX + i * (btnW + gap);
       b.y = btnY;
       b.w = btnW;
       b.h = btnH;
       strcpy(b.label, drLabels[i]);
       b.role = (strcmp(drLabels[i], "CLR") == 0) ? 2 : 1;
-      b.is_hovered = 0; 
-                        
-      
+      b.is_hovered = 0;
+
       int mouseX, mouseY;
       SDL_GetMouseState(&mouseX, &mouseY);
-      float pxRatioInv = 1.0f; 
+      float pxRatioInv = 1.0f;
       if (mouseX >= b.x && mouseX < b.x + b.w && mouseY >= b.y &&
           mouseY < b.y + b.h) {
         b.is_hovered = 1;
@@ -1851,14 +2053,12 @@ void ui_render(SDL_Window *win) {
     }
   }
 
-  
   if (isCrashMode) {
     draw_crash_screen(vg, w, h);
   }
 
-  
   if (isDevMode) {
-    
+
     frameCount++;
     Uint32 currentTime = SDL_GetTicks();
     if (currentTime - lastFPSUpdate > 1000) {
@@ -1867,9 +2067,8 @@ void ui_render(SDL_Window *win) {
       lastFPSUpdate = currentTime;
     }
 
-    
     nvgFontSize(vg, 14);
-    nvgFillColor(vg, nvgRGB(0, 255, 0)); 
+    nvgFillColor(vg, nvgRGB(0, 255, 0));
     nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
 
     char debugText[256];
@@ -1906,11 +2105,10 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-  SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8); 
+  SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
   SDL_Window *win = SDL_CreateWindow(
       "jai's calculator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 232,
@@ -1934,27 +2132,20 @@ int main(int argc, char *argv[]) {
   }
   SDL_GL_MakeCurrent(win, glContext);
 
-  
   set_macos_window_style(win);
 
-  
   SDL_GL_SetSwapInterval(1);
 
-  
   ui_init_nanovg();
 
-  
   if (model_load("model.bin", &nn)) {
     printf("Successfully loaded model.bin\n");
     modelLoaded = 1;
   } else {
-    
   }
 
-  
   load_state();
 
-  
   time_t now = time(NULL);
   struct tm *local = localtime(&now);
   int hour = local->tm_hour;
@@ -1975,9 +2166,7 @@ int main(int argc, char *argv[]) {
   while (!quit) {
     int mouseX, mouseY;
     SDL_GetMouseState(&mouseX, &mouseY);
-    ui_handle_mouse_move(mouseX,
-                         mouseY); 
-                                  
+    ui_handle_mouse_move(mouseX, mouseY);
 
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_QUIT) {
@@ -1985,10 +2174,10 @@ int main(int argc, char *argv[]) {
       } else if (e.type == SDL_MOUSEBUTTONDOWN) {
         handleButtonClick(e.button.x, e.button.y);
       } else if (e.type == SDL_MOUSEBUTTONUP) {
-        isDrawing = 0;    
-        isEqualsDown = 0; 
+        isDrawing = 0;
+        isEqualsDown = 0;
       } else if (e.type == SDL_MOUSEMOTION && isDrawing && showDraw) {
-        
+
         int x = e.motion.x;
         int y = e.motion.y;
         int w, h;
@@ -2011,8 +2200,8 @@ int main(int argc, char *argv[]) {
           int col = (x - gridX) / cellSize;
           int row = (y - gridY) / cellSize;
           if (col >= 0 && col < 28 && row >= 0 && row < 28) {
-            drawGrid[row][col] = 1;        
-            lastDrawTime = SDL_GetTicks(); 
+            drawGrid[row][col] = 1;
+            lastDrawTime = SDL_GetTicks();
             hasDrawnSomething = 1;
           }
         }
@@ -2021,18 +2210,17 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    
     if (showDraw && hasDrawnSomething && !isDrawing) {
       Uint32 now = SDL_GetTicks();
       if (now - lastDrawTime > AUTO_PREDICT_DELAY) {
         predictedDigit = predictDigit();
 
         if (predictedDigit == -2) {
-          
+
           isHeartAnimActive = 1;
           easterEggStart = SDL_GetTicks();
         } else if (predictedDigit >= 0 && predictedDigit <= 9) {
-          
+
           char digit[2] = {'0' + predictedDigit, '\0'};
           calc_inputDigit(digit);
 
@@ -2051,7 +2239,6 @@ int main(int argc, char *argv[]) {
           }
         }
 
-        
         for (int r = 0; r < 28; r++) {
           for (int c = 0; c < 28; c++) {
             drawGrid[r][c] = 0;
@@ -2060,21 +2247,18 @@ int main(int argc, char *argv[]) {
         hasDrawnSomething = 0;
       }
     }
-    
+
     if (isRainbowMode) {
-      rainbowHue += 2.0f; 
+      rainbowHue += 2.0f;
       if (rainbowHue >= 360.0f)
         rainbowHue -= 360.0f;
     }
 
     ui_render(win);
-    
   }
 
   save_state();
 
-  
-  
   SDL_GL_DeleteContext(glContext);
   SDL_DestroyWindow(win);
   SDL_Quit();
@@ -2085,10 +2269,8 @@ void save_state() {
   if (!f)
     return;
 
-  
   fwrite(&calc, sizeof(Calculator), 1, f);
 
-  
   fwrite(&historyCount, sizeof(int), 1, f);
   fwrite(history, sizeof(HistoryEntry), 8, f);
 
