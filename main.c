@@ -1273,10 +1273,10 @@ void initGraphButtons(int page) {
 
   if (page == 0) { // NUM
     char *numLabels[] = {
-        "x",   "y", "x^2",  "x^n", "7", "8", "9", "/", "func", "(", ")", "CLR",
-        "abs", ",", "<=",   ">=",  "4", "5", "6", "*", "bksp", "<", ">", "ENT",
-        "ABC", " ", "sqrt", "pi",  "1", "2", "3", "-", " ",    " ", " ", " ",
-        " ",   " ", " ",    " ",   "0", ".", "=", "+"};
+        "x",   "y",   "x²",  "xⁿ", "7", "8", "9", "/", "func", "(",    ")",
+        "CLR", "abs", ",",   "≤",  "≥", "4", "5", "6", "*",    "bksp", "<",
+        ">",   "ENT", "ABC", " ",  "√", "π", "1", "2", "3",    "-",    " ",
+        " ",   " ",   " ",   " ",  " ", " ", " ", "0", ".",    "=",    "+"};
     count = 44;
     for (int i = 0; i < count; i++)
       labels[i] = numLabels[i];
@@ -1296,7 +1296,7 @@ void initGraphButtons(int page) {
     char *funcLabels[] = {
         "sin", "cos", "tan",  "log",  "ln",   "abs",  "sign", "floor", "ceil",
         "(",   ")",   "CLR",  "asin", "acos", "atan", "sinh", "cosh",  "tanh",
-        "mod", "^",   "sqrt", "sqrt", "pi",   "bksp", "123",  " ",     " ",
+        "mod", "^",   "sqrt", "√",    "π",    "bksp", "123",  " ",     " ",
         " ",   " ",   " ",    " ",    " ",    " ",    " ",    " ",     "ENT"};
     count = 36;
     for (int i = 0; i < count; i++)
@@ -1538,16 +1538,26 @@ void handleButtonClick(int x, int y) {
         } else if (strcmp(b->label, "ENT") == 0) {
           // Re-render handled by main loop
         } else if (strlen(b->label) > 0 && strcmp(b->label, " ") != 0) {
-          if (strcmp(b->label, "x^2") == 0) {
+          if (strcmp(b->label, "x²") == 0) {
             strncat(graphEq, "^2", sizeof(graphEq) - strlen(graphEq) - 1);
-          } else if (strcmp(b->label, "x^n") == 0) {
+          } else if (strcmp(b->label, "xⁿ") == 0) {
             strncat(graphEq, "^", sizeof(graphEq) - strlen(graphEq) - 1);
-          } else if (strcmp(b->label, "sqrt") == 0) {
+          } else if (strcmp(b->label, "sqrt") == 0 ||
+                     strcmp(b->label, "√") == 0) {
             strncat(graphEq, "sqrt(", sizeof(graphEq) - strlen(graphEq) - 1);
           } else if (strcmp(b->label, "abs") == 0) {
             strncat(graphEq, "abs(", sizeof(graphEq) - strlen(graphEq) - 1);
-          } else if (strcmp(b->label, "pi") == 0) {
+          } else if (strcmp(b->label, "pi") == 0 ||
+                     strcmp(b->label, "π") == 0) {
             strncat(graphEq, "pi", sizeof(graphEq) - strlen(graphEq) - 1);
+          } else if (strcmp(b->label, "≤") == 0) {
+            strncat(graphEq, "<=", sizeof(graphEq) - strlen(graphEq) - 1);
+          } else if (strcmp(b->label, "≥") == 0) {
+            strncat(graphEq, ">=", sizeof(graphEq) - strlen(graphEq) - 1);
+          } else if (strcmp(b->label, "←") == 0) {
+            strncat(graphEq, "<", sizeof(graphEq) - strlen(graphEq) - 1);
+          } else if (strcmp(b->label, "→") == 0) {
+            strncat(graphEq, ">", sizeof(graphEq) - strlen(graphEq) - 1);
           } else {
             char *pats[] = {"sin",  "cos",   "tan",  "log",  "ln",
                             "sign", "floor", "ceil", "asin", "acos",
@@ -1979,6 +1989,32 @@ void draw_graph_grid(NVGcontext *vg, float x, float y, float w, float h) {
     nvgStroke(vg);
   }
 
+  // Axis Labels
+  nvgFontSize(vg, 12);
+  nvgFillColor(vg, current_theme->text_secondary);
+  char label[32];
+
+  // X-axis labels
+  for (float i = ceil(xMin); i <= floor(xMax); i += 2.0f) {
+    if (fabs(i) < 0.1)
+      continue;
+    float px = x + (i - xMin) * scaleX;
+    snprintf(label, sizeof(label), "%.0f", i);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+    nvgText(vg, px, zeroY + 5 > y + h - 15 ? zeroY - 15 : zeroY + 5, label,
+            NULL);
+  }
+
+  // Y-axis labels
+  for (float j = ceil(yMin); j <= floor(yMax); j += 2.0f) {
+    if (fabs(j) < 0.1)
+      continue;
+    float py = y + h - (j - yMin) * scaleY;
+    snprintf(label, sizeof(label), "%.0f", j);
+    nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+    nvgText(vg, zeroX - 5 < x + 5 ? zeroX + 25 : zeroX - 5, py, label, NULL);
+  }
+
   nvgRestore(vg);
 }
 
@@ -2208,6 +2244,21 @@ void ui_render(SDL_Window *win) {
     draw_graph_curve(vg, graphAreaX, graphAreaY, graphAreaW, graphAreaH);
     draw_graph_sidebar(vg, sidebarX, sidebarY, sidebarW, sidebarH);
     draw_graph_keypad(vg, keypadX, keypadY, keypadW, keypadH);
+
+    // Mouse coordinates
+    SDL_GetMouseState(&mouseX, &mouseY);
+    if (mouseX >= graphAreaX && mouseX < graphAreaX + graphAreaW &&
+        mouseY >= graphAreaY && mouseY < graphAreaY + graphAreaH) {
+      float xv = xMin + (mouseX - graphAreaX) / graphAreaW * (xMax - xMin);
+      float yv = yMin + (graphAreaY + graphAreaH - mouseY) / graphAreaH *
+                            (yMax - yMin);
+      char coordText[64];
+      snprintf(coordText, sizeof(coordText), "(%.2f, %.2f)", xv, yv);
+      nvgFontSize(vg, 16);
+      nvgFillColor(vg, current_theme->text_primary);
+      nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+      nvgText(vg, mouseX + 15, mouseY + 15, coordText, NULL);
+    }
 
     draw_button_render(vg, &modeBtn, dt);
   } else {
