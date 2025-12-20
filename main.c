@@ -2160,7 +2160,7 @@ void draw_graph_sidebar(NVGcontext *vg, float x, float y, float w, float h) {
 
   // Expression input box
   float boxX = x + 10;
-  float boxY = y + 50;
+  float boxY = y + 80;
   float boxW = w - 20;
   float boxH = 40;
 
@@ -2178,12 +2178,12 @@ void draw_graph_sidebar(NVGcontext *vg, float x, float y, float w, float h) {
 
   // Sidebar Title
   nvgFontSize(vg, 18);
-  nvgText(vg, x + 10, y + 25, "Expressions", NULL);
+  nvgText(vg, x + 10, y + 55, "Expressions", NULL);
 
   // Toggle Icon
   nvgFontSize(vg, 18);
   nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-  nvgText(vg, x + w - 10, y + 25, isSidebarExpanded ? "<<" : ">>", NULL);
+  nvgText(vg, x + w - 10, y + 55, isSidebarExpanded ? "<<" : ">>", NULL);
 }
 
 void draw_graph_keypad(NVGcontext *vg, float x, float y, float w, float h) {
@@ -2599,6 +2599,17 @@ int main(int argc, char *argv[]) {
         }
       } else if (e.type == SDL_KEYDOWN) {
         handleKeyboard(e.key.keysym.sym);
+      } else if (e.type == SDL_MOUSEWHEEL && currentMode == MODE_GRAPH) {
+        float scale = (e.wheel.y > 0) ? 0.9f : 1.1f;
+        float xRange = xMax - xMin;
+        float yRange = yMax - yMin;
+        float xMid = (xMax + xMin) / 2.0f;
+        float yMid = (yMax + yMin) / 2.0f;
+
+        xMin = xMid - (xRange * scale) / 2.0f;
+        xMax = xMid + (xRange * scale) / 2.0f;
+        yMin = yMid - (yRange * scale) / 2.0f;
+        yMax = yMid + (yRange * scale) / 2.0f;
       }
     }
 
