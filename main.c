@@ -119,6 +119,7 @@ float sidebarX, sidebarY, sidebarW, sidebarH;
 float keypadX, keypadY, keypadW, keypadH;
 Button graphButtons[48];
 int numGraphButtons = 0;
+int graphKeypadPage = 0; // 0: NUM, 1: ABC, 2: FUNC
 
 void triggerClickAnim(int type, int idx) {
   clickAnimType = type;
@@ -145,6 +146,8 @@ int isPrime(double val) {
   }
   return 1;
 }
+double signum(double x) { return (x > 0) - (x < 0); }
+
 // Expression Parser for Graphing
 typedef struct {
   const char *ptr;
@@ -160,9 +163,75 @@ double parse_graph_factor(GraphParser *p, double xVal) {
       p->ptr++;
     return val;
   }
-  if (*p->ptr == 'x') {
+  if (*p->ptr == '-') {
+    p->ptr++;
+    return -parse_graph_factor(p, xVal);
+  }
+  if (*p->ptr == '+') {
+    p->ptr++;
+    return parse_graph_factor(p, xVal);
+  }
+  if (isalpha(*p->ptr) && !isalpha(*(p->ptr + 1)) && *(p->ptr + 1) != '(') {
+    // Single letter variable
     p->ptr++;
     return xVal;
+  }
+  if (strncmp(p->ptr, "pi", 2) == 0 && !isalpha(*(p->ptr + 2))) {
+    p->ptr += 2;
+    return M_PI;
+  }
+  if (strncmp(p->ptr, "abs", 3) == 0) {
+    p->ptr += 3;
+    return fabs(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "sign", 4) == 0) {
+    p->ptr += 4;
+    return signum(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "floor", 5) == 0) {
+    p->ptr += 5;
+    return floor(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "ceil", 4) == 0) {
+    p->ptr += 4;
+    return ceil(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "sqrt", 4) == 0) {
+    p->ptr += 4;
+    return sqrt(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "sinh", 4) == 0) {
+    p->ptr += 4;
+    return sinh(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "cosh", 4) == 0) {
+    p->ptr += 4;
+    return cosh(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "tanh", 4) == 0) {
+    p->ptr += 4;
+    return tanh(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "mod", 3) == 0) {
+    p->ptr += 3;
+    while (isspace(*p->ptr))
+      p->ptr++;
+    if (*p->ptr == '(') {
+      p->ptr++;
+      double a = parse_graph_expr(p, xVal);
+      while (isspace(*p->ptr))
+        p->ptr++;
+      if (*p->ptr == ',') {
+        p->ptr++;
+        double b = parse_graph_expr(p, xVal);
+        while (isspace(*p->ptr))
+          p->ptr++;
+        if (*p->ptr == ')')
+          p->ptr++;
+        return fmod(a, b);
+      }
+    }
+    return 0;
   }
   if (strncmp(p->ptr, "sin", 3) == 0) {
     p->ptr += 3;
@@ -176,9 +245,17 @@ double parse_graph_factor(GraphParser *p, double xVal) {
     p->ptr += 3;
     return tan(parse_graph_factor(p, xVal));
   }
-  if (strncmp(p->ptr, "sqrt", 4) == 0) {
+  if (strncmp(p->ptr, "asin", 4) == 0) {
     p->ptr += 4;
-    return sqrt(parse_graph_factor(p, xVal));
+    return asin(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "acos", 4) == 0) {
+    p->ptr += 4;
+    return acos(parse_graph_factor(p, xVal));
+  }
+  if (strncmp(p->ptr, "atan", 4) == 0) {
+    p->ptr += 4;
+    return atan(parse_graph_factor(p, xVal));
   }
   if (strncmp(p->ptr, "log", 3) == 0) {
     p->ptr += 3;
@@ -198,19 +275,29 @@ double parse_graph_factor(GraphParser *p, double xVal) {
 }
 double parse_graph_term(GraphParser *p, double xVal) {
   double val = parse_graph_factor(p, xVal);
-  while (isspace(*p->ptr))
-    p->ptr++;
-  while (*p->ptr == '*' || *p->ptr == '/' || *p->ptr == '^') {
-    char op = *p->ptr++;
-    double next = parse_graph_factor(p, xVal);
-    if (op == '*')
-      val *= next;
-    else if (op == '/')
-      val = (next != 0) ? val / next : 0;
-    else if (op == '^')
-      val = pow(val, next);
+  while (1) {
     while (isspace(*p->ptr))
       p->ptr++;
+    if (*p->ptr == '*' || *p->ptr == '/') {
+      char op = *p->ptr++;
+      double next = parse_graph_factor(p, xVal);
+      if (op == '*')
+        val *= next;
+      else
+        val = (next != 0) ? val / next : 0;
+    } else if (*p->ptr == '^') {
+      p->ptr++;
+      double next = parse_graph_factor(p, xVal);
+      val = pow(val, next);
+    } else if (*p->ptr == '(' || *p->ptr == 'x' || isdigit(*p->ptr) ||
+               (isalpha(*p->ptr) && strncmp(p->ptr, "pi", 2) != 0)) {
+      // Implicit multiplication
+      val *= parse_graph_factor(p, xVal);
+    } else if (strncmp(p->ptr, "pi", 2) == 0) {
+      val *= parse_graph_factor(p, xVal);
+    } else {
+      break;
+    }
   }
   return val;
 }
@@ -233,7 +320,30 @@ double parse_graph_expr(GraphParser *p, double xVal) {
 double evaluate_graph(const char *expr, double xVal) {
   if (!expr || strlen(expr) == 0)
     return 0;
-  GraphParser p = {expr};
+
+  const char *lastEq = NULL;
+  const char *curr = expr;
+  while (*curr) {
+    if (*curr == '=' &&
+        (curr == expr || (*(curr - 1) != '<' && *(curr - 1) != '>' &&
+                          *(curr - 1) != '!' && *(curr + 1) != '='))) {
+      lastEq = curr;
+    }
+    curr++;
+  }
+
+  const char *actualExpr = expr;
+  if (lastEq) {
+    actualExpr = lastEq + 1;
+  }
+
+  while (isspace(*actualExpr))
+    actualExpr++;
+
+  if (!*actualExpr)
+    return 0;
+
+  GraphParser p = {actualExpr};
   return parse_graph_expr(&p, xVal);
 }
 
@@ -1099,6 +1209,63 @@ void initTheme() {
   current_theme = &theme_dark;
 }
 
+void initGraphButtons(int page) {
+  numGraphButtons = 0;
+  char *labels[48];
+  int count = 0;
+
+  if (page == 0) { // NUM
+    char *numLabels[] = {
+        "x",   "y",   "a²",  "aⁿ", "7", "8", "9", "/", "func", "(",    ")",
+        "CLR", "|a|", ",",   "≤",  "≥", "4", "5", "6", "*",    "bksp", "←",
+        "→",   "ENT", "ABC", " ",  "√", "π", "1", "2", "3",    "-",    " ",
+        " ",   " ",   " ",   " ",  " ", " ", " ", "0", ".",    "=",    "+"};
+    count = 44;
+    for (int i = 0; i < count; i++)
+      labels[i] = numLabels[i];
+  } else if (page == 1) { // ABC
+    char *abcLabels[] = {"q", "w",    "e",   "r", "t", "y",   "u",   "i", "o",
+                         "p", "bksp", "CLR", "a", "s", "d",   "f",   "g", "h",
+                         "j", "k",    "l",   " ", " ", "ENT", "z",   "x", "c",
+                         "v", "b",    "n",   "m", ",", ".",   "123", " ", " "};
+    count = 36;
+    for (int i = 0; i < count; i++) {
+      if (i < 34)
+        labels[i] = abcLabels[i];
+      else
+        labels[i] = " ";
+    }
+  } else if (page == 2) { // FUNC
+    char *funcLabels[] = {
+        "sin", "cos", "tan",  "log",  "ln",   "abs",  "sign", "floor", "ceil",
+        "(",   ")",   "CLR",  "asin", "acos", "atan", "sinh", "cosh",  "tanh",
+        "mod", "^",   "sqrt", "√",    "π",    "bksp", "123",  " ",     " ",
+        " ",   " ",   " ",    " ",    " ",    " ",    " ",    " ",     "ENT"};
+    count = 36;
+    for (int i = 0; i < count; i++)
+      labels[i] = funcLabels[i];
+  }
+
+  for (int i = 0; i < count; i++) {
+    Button *b = &graphButtons[numGraphButtons++];
+    strncpy(b->label, labels[i], sizeof(b->label) - 1);
+    b->label[sizeof(b->label) - 1] = '\0';
+
+    // Determine role and color
+    b->role = 2; // Default action
+    if (isdigit(b->label[0]) || (strlen(b->label) == 1 && b->label[0] == '.'))
+      b->role = 0;
+    if (strlen(b->label) == 1 && strchr("+-*/=", b->label[0]))
+      b->role = 1;
+
+    b->color = (b->role == 0)   ? current_theme->btn_bg_digit
+               : (b->role == 1) ? current_theme->btn_bg_op
+                                : current_theme->btn_bg_action;
+    b->is_hovered = 0;
+    b->anim_t = 0;
+  }
+}
+
 void initButtons(void) {
   initTheme();
   numButtons = 0;
@@ -1180,21 +1347,7 @@ void initButtons(void) {
     }
   }
 
-  // Init Graph Buttons
-  char *graphLabels[] = {
-      "x",   "y",   "a²",  "aⁿ",  "7",  "8", "9", "/", "func", "<",    ">",
-      "CLR", "(",   ")",   "<",   ">",  "4", "5", "6", "*",    "bksp", "←",
-      "→",   "ENT", "|a|", ",",   "≤",  "≥", "1", "2", "3",    "-",    "",
-      "",    "",    "",    "ABC", "sm", "√", "π", "0", ".",    "=",    "+"};
-  numGraphButtons = 0;
-  for (int i = 0; i < 44; i++) {
-    Button *b = &graphButtons[numGraphButtons++];
-    strcpy(b->label, graphLabels[i]);
-    b->role = (i % 12 >= 4 && i % 12 <= 6) ? 0 : (i % 12 == 7 ? 1 : 2);
-    b->color = (b->role == 0)   ? current_theme->btn_bg_digit
-               : (b->role == 1) ? current_theme->btn_bg_op
-                                : current_theme->btn_bg_action;
-  }
+  initGraphButtons(graphKeypadPage);
 
   updateLayout(winWidth, winHeight);
 }
@@ -1284,6 +1437,8 @@ void handleButtonClick(int x, int y) {
       showDraw = 0;
       showHistory = 0;
       isDropdownOpen = 0;
+      graphKeypadPage = 0;
+      initGraphButtons(0);
       SDL_SetWindowSize(win, 1000, 500);
       updateLayout(1000, 500);
       return;
@@ -1311,10 +1466,51 @@ void handleButtonClick(int x, int y) {
           int len = strlen(graphEq);
           if (len > 0)
             graphEq[len - 1] = '\0';
+        } else if (strcmp(b->label, "ABC") == 0) {
+          graphKeypadPage = 1;
+          initGraphButtons(1);
+          updateLayout(w, h);
+        } else if (strcmp(b->label, "123") == 0) {
+          graphKeypadPage = 0;
+          initGraphButtons(0);
+          updateLayout(w, h);
+        } else if (strcmp(b->label, "func") == 0) {
+          graphKeypadPage = 2;
+          initGraphButtons(2);
+          updateLayout(w, h);
         } else if (strcmp(b->label, "ENT") == 0) {
           // Re-render handled by main loop
-        } else if (strlen(b->label) > 0) {
-          strncat(graphEq, b->label, sizeof(graphEq) - strlen(graphEq) - 1);
+        } else if (strlen(b->label) > 0 && strcmp(b->label, " ") != 0) {
+          if (strcmp(b->label, "a²") == 0) {
+            strncat(graphEq, "^2", sizeof(graphEq) - strlen(graphEq) - 1);
+          } else if (strcmp(b->label, "aⁿ") == 0) {
+            strncat(graphEq, "^", sizeof(graphEq) - strlen(graphEq) - 1);
+          } else if (strcmp(b->label, "√") == 0 ||
+                     strcmp(b->label, "sqrt") == 0) {
+            strncat(graphEq, "sqrt(", sizeof(graphEq) - strlen(graphEq) - 1);
+          } else if (strcmp(b->label, "|a|") == 0 ||
+                     strcmp(b->label, "abs") == 0) {
+            strncat(graphEq, "abs(", sizeof(graphEq) - strlen(graphEq) - 1);
+          } else if (strcmp(b->label, "π") == 0) {
+            strncat(graphEq, "pi", sizeof(graphEq) - strlen(graphEq) - 1);
+          } else {
+            char *pats[] = {"sin",  "cos",   "tan",  "log",  "ln",
+                            "sign", "floor", "ceil", "asin", "acos",
+                            "atan", "sinh",  "cosh", "tanh", "mod"};
+            int isFunc = 0;
+            for (int k = 0; k < 15; k++) {
+              if (strcmp(b->label, pats[k]) == 0) {
+                strncat(graphEq, b->label,
+                        sizeof(graphEq) - strlen(graphEq) - 1);
+                strncat(graphEq, "(", sizeof(graphEq) - strlen(graphEq) - 1);
+                isFunc = 1;
+                break;
+              }
+            }
+            if (!isFunc) {
+              strncat(graphEq, b->label, sizeof(graphEq) - strlen(graphEq) - 1);
+            }
+          }
         }
         triggerClickAnim(5, i);
         return;
@@ -1483,6 +1679,28 @@ void handleKeyboard(SDL_Keycode key) {
              key != SDLK_RIGHT && key != SDLK_b && key != SDLK_a) {
 
     konamiIndex = 0;
+  }
+
+  if (currentMode == MODE_GRAPH) {
+    if (key == SDLK_BACKSPACE) {
+      int len = strlen(graphEq);
+      if (len > 0)
+        graphEq[len - 1] = '\0';
+      return;
+    }
+    if (key == SDLK_DELETE) {
+      graphEq[0] = '\0';
+      return;
+    }
+    if (key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_ESCAPE) {
+      return;
+    }
+    if (key >= 32 && key <= 126) {
+      char s[2] = {(char)key, '\0'};
+      strncat(graphEq, s, sizeof(graphEq) - strlen(graphEq) - 1);
+      return;
+    }
+    return;
   }
 
   if (currentMode == MODE_DRAW) {
@@ -1724,8 +1942,17 @@ void draw_graph_curve(NVGcontext *vg, float x, float y, float w, float h) {
 
   int first = 1;
   for (int i = 0; i <= w; i++) {
-    float xv = xMin + (float)i / w * (xMax - xMin);
+    float xv = xMin + (float)i / (float)w * (xMax - xMin);
     float yv = (float)evaluate_graph(graphEq, xv);
+
+    if (isnan(yv) || isinf(yv) || yv > 1e6 || yv < -1e6) {
+      if (!first) {
+        nvgStroke(vg);
+        nvgBeginPath(vg);
+        first = 1;
+      }
+      continue;
+    }
 
     float px = x + i;
     float py = y + h - (yv - yMin) * scaleY;
@@ -1858,13 +2085,31 @@ void ui_render(SDL_Window *win) {
   nvgFill(vg);
 
   if (currentMode == MODE_GRAPH) {
+    // Update graph buttons hover & anim
+    int mouseX, mouseY;
+    SDL_GetMouseState(&mouseX, &mouseY);
+    for (int i = 0; i < numGraphButtons; i++) {
+      Button *b = &graphButtons[i];
+      if (mouseX >= b->x && mouseX < b->x + b->w && mouseY >= b->y &&
+          mouseY < b->y + b->h) {
+        b->is_hovered = 1;
+        b->anim_t += dt * 5.0f;
+        if (b->anim_t > 1.0f)
+          b->anim_t = 1.0f;
+      } else {
+        b->is_hovered = 0;
+        b->anim_t -= dt * 5.0f;
+        if (b->anim_t < 0.0f)
+          b->anim_t = 0.0f;
+      }
+    }
+
     draw_graph_grid(vg, graphAreaX, graphAreaY, graphAreaW, graphAreaH);
     draw_graph_curve(vg, graphAreaX, graphAreaY, graphAreaW, graphAreaH);
     draw_graph_sidebar(vg, sidebarX, sidebarY, sidebarW, sidebarH);
     draw_graph_keypad(vg, keypadX, keypadY, keypadW, keypadH);
 
-    // Dropdown toggle button still needs to be drawn
-    draw_button_render(vg, &modeBtn, 0.016f);
+    draw_button_render(vg, &modeBtn, dt);
   } else {
     if (showHistory || currentMode == MODE_RPN) {
       nvgBeginPath(vg);
