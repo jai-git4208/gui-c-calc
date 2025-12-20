@@ -1,16 +1,16 @@
 # Calculator
 
-A fast, native calculator for macOS and Linux. It handles basic math, scientific functions, RPN (Reverse Polish Notation), and even recognizes your handwriting.
+A fast, native calculator for macOS and Linux. It handles basic math, scientific functions, RPN (Reverse Polish Notation), and even recognizes your handwriting. (made just to flex my low level programming skills)
 
 ![Basic Mode](res/basic.png)
 
 ## Features
 
 - **Multiple Modes**: Switch between Basic, Scientific, RPN, and Unit Conversion (Length, Mass, Temperature).
-- **Handwriting Recognition**: Draw digits directly on the screen! It uses a built-in neural network to understand what you're writing.
-- **Modern UI**: Smooth, hardware-accelerated graphics using NanoVG and OpenGL.
-- **Smart Layout**: The window is fully resizable and the buttons adjust automatically.
-- **History**: Keeps track of your calculations so you don't have to.
+- **Handwriting Recognition**: You can draw digits on the grid. It uses a built-in neural network to understand what you're writing.
+- **Modern UI**: Smooth, hardware-accelerated graphics using NanoVG.
+- **Smart Layout**: The window is fully resizable and the buttons adjust automatically. Responsiveness in C! xD
+- **History**: Keeps track of your calculations so you don't have to. 
 
 ### See it in action
 [Watch the demo video](res/demo.mov)
@@ -39,7 +39,7 @@ cc -O2 -o train train.c -lm
 Make sure you have `SDL2` and `SDL2_ttf` installed.
 
 ```bash
-cc -O2 -o calc main.c -lSDL2 -lSDL2_ttf -framework OpenGL -lm
+make
 ./calc
 ```
 
@@ -47,5 +47,7 @@ cc -O2 -o calc main.c -lSDL2 -lSDL2_ttf -framework OpenGL -lm
 
 - `main.c`: The core of the app—UI, logic, and prediction.
 - `train.c`: The code used to train the neural network.
-- `res/`: Icons and screenshots.
+- `res/`: screenshots of project
 - `lib/` & `nanovg`: Libraries for rendering.
+
+### made with Love by jai
