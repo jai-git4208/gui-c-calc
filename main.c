@@ -317,24 +317,75 @@ double parse_graph_expr(GraphParser *p, double xVal) {
   }
   return val;
 }
+double parse_graph_comparison(GraphParser *p, double xVal) {
+  double val = parse_graph_expr(p, xVal);
+  while (1) {
+    while (isspace(*p->ptr))
+      p->ptr++;
+    if (strncmp(p->ptr, "<=", 2) == 0) {
+      p->ptr += 2;
+      val = (val <= parse_graph_expr(p, xVal));
+    } else if (strncmp(p->ptr, ">=", 2) == 0) {
+      p->ptr += 2;
+      val = (val >= parse_graph_expr(p, xVal));
+    } else if (strncmp(p->ptr, "==", 2) == 0) {
+      p->ptr += 2;
+      val = (val == parse_graph_expr(p, xVal));
+    } else if (strncmp(p->ptr, "!=", 2) == 0) {
+      p->ptr += 2;
+      val = (val != parse_graph_expr(p, xVal));
+    } else if (*p->ptr == '<') {
+      p->ptr++;
+      val = (val < parse_graph_expr(p, xVal));
+    } else if (*p->ptr == '>') {
+      p->ptr++;
+      val = (val > parse_graph_expr(p, xVal));
+    } else {
+      break;
+    }
+  }
+  return val;
+}
 double evaluate_graph(const char *expr, double xVal) {
   if (!expr || strlen(expr) == 0)
     return 0;
 
-  const char *lastEq = NULL;
-  const char *curr = expr;
-  while (*curr) {
-    if (*curr == '=' &&
-        (curr == expr || (*(curr - 1) != '<' && *(curr - 1) != '>' &&
-                          *(curr - 1) != '!' && *(curr + 1) != '='))) {
-      lastEq = curr;
-    }
-    curr++;
-  }
-
   const char *actualExpr = expr;
-  if (lastEq) {
-    actualExpr = lastEq + 1;
+  // Skip "y =" or "y<" or "y>"
+  while (isspace(*actualExpr))
+    actualExpr++;
+  if (*actualExpr == 'y') {
+    const char *next = actualExpr + 1;
+    while (isspace(*next))
+      next++;
+    if (*next == '=' || *next == '<' || *next == '>') {
+      if (*next == '=' && *(next + 1) == '=') {
+        // equality, don't skip
+      } else {
+        actualExpr = next;
+        if (*actualExpr == '=')
+          actualExpr++;
+        else if (*actualExpr == '<' || *actualExpr == '>') {
+          actualExpr++;
+          if (*actualExpr == '=')
+            actualExpr++;
+        }
+      }
+    }
+  } else {
+    // Legacy support for skipping everything before last '='
+    const char *lastEq = NULL;
+    const char *curr = expr;
+    while (*curr) {
+      if (*curr == '=' &&
+          (curr == expr || (*(curr - 1) != '<' && *(curr - 1) != '>' &&
+                            *(curr - 1) != '!' && *(curr + 1) != '='))) {
+        lastEq = curr;
+      }
+      curr++;
+    }
+    if (lastEq)
+      actualExpr = lastEq + 1;
   }
 
   while (isspace(*actualExpr))
@@ -344,7 +395,7 @@ double evaluate_graph(const char *expr, double xVal) {
     return 0;
 
   GraphParser p = {actualExpr};
-  return parse_graph_expr(&p, xVal);
+  return parse_graph_comparison(&p, xVal);
 }
 
 void recordInput(const char *key) {
@@ -932,13 +983,13 @@ void updateLayout(int width, int height) {
   winHeight = height;
 
   if (currentMode == MODE_GRAPH) {
-    sidebarW = isSidebarExpanded ? 250 : 0;
+    sidebarW = isSidebarExpanded ? 200 : 0;
     sidebarX = 0;
     sidebarY = 0;
-    sidebarH = height - 150;
+    sidebarH = height - 120;
 
     keypadW = width;
-    keypadH = 150;
+    keypadH = 120;
     keypadX = 0;
     keypadY = height - keypadH;
 
@@ -946,6 +997,12 @@ void updateLayout(int width, int height) {
     graphAreaY = 0;
     graphAreaW = width - sidebarW;
     graphAreaH = height - keypadH;
+
+    // Position mode button in graph mode (top left of graph area or sidebar)
+    modeBtn.x = sidebarW + 10;
+    modeBtn.y = 10;
+    modeBtn.w = 40;
+    modeBtn.h = 30;
 
     // Layout graph keypad buttons
     int gRows = 4;
@@ -1216,10 +1273,10 @@ void initGraphButtons(int page) {
 
   if (page == 0) { // NUM
     char *numLabels[] = {
-        "x",   "y",   "a²",  "aⁿ", "7", "8", "9", "/", "func", "(",    ")",
-        "CLR", "|a|", ",",   "≤",  "≥", "4", "5", "6", "*",    "bksp", "←",
-        "→",   "ENT", "ABC", " ",  "√", "π", "1", "2", "3",    "-",    " ",
-        " ",   " ",   " ",   " ",  " ", " ", " ", "0", ".",    "=",    "+"};
+        "x",   "y", "x^2",  "x^n", "7", "8", "9", "/", "func", "(", ")", "CLR",
+        "abs", ",", "<=",   ">=",  "4", "5", "6", "*", "bksp", "<", ">", "ENT",
+        "ABC", " ", "sqrt", "pi",  "1", "2", "3", "-", " ",    " ", " ", " ",
+        " ",   " ", " ",    " ",   "0", ".", "=", "+"};
     count = 44;
     for (int i = 0; i < count; i++)
       labels[i] = numLabels[i];
@@ -1239,7 +1296,7 @@ void initGraphButtons(int page) {
     char *funcLabels[] = {
         "sin", "cos", "tan",  "log",  "ln",   "abs",  "sign", "floor", "ceil",
         "(",   ")",   "CLR",  "asin", "acos", "atan", "sinh", "cosh",  "tanh",
-        "mod", "^",   "sqrt", "√",    "π",    "bksp", "123",  " ",     " ",
+        "mod", "^",   "sqrt", "sqrt", "pi",   "bksp", "123",  " ",     " ",
         " ",   " ",   " ",    " ",    " ",    " ",    " ",    " ",     "ENT"};
     count = 36;
     for (int i = 0; i < count; i++)
@@ -1481,17 +1538,15 @@ void handleButtonClick(int x, int y) {
         } else if (strcmp(b->label, "ENT") == 0) {
           // Re-render handled by main loop
         } else if (strlen(b->label) > 0 && strcmp(b->label, " ") != 0) {
-          if (strcmp(b->label, "a²") == 0) {
+          if (strcmp(b->label, "x^2") == 0) {
             strncat(graphEq, "^2", sizeof(graphEq) - strlen(graphEq) - 1);
-          } else if (strcmp(b->label, "aⁿ") == 0) {
+          } else if (strcmp(b->label, "x^n") == 0) {
             strncat(graphEq, "^", sizeof(graphEq) - strlen(graphEq) - 1);
-          } else if (strcmp(b->label, "√") == 0 ||
-                     strcmp(b->label, "sqrt") == 0) {
+          } else if (strcmp(b->label, "sqrt") == 0) {
             strncat(graphEq, "sqrt(", sizeof(graphEq) - strlen(graphEq) - 1);
-          } else if (strcmp(b->label, "|a|") == 0 ||
-                     strcmp(b->label, "abs") == 0) {
+          } else if (strcmp(b->label, "abs") == 0) {
             strncat(graphEq, "abs(", sizeof(graphEq) - strlen(graphEq) - 1);
-          } else if (strcmp(b->label, "π") == 0) {
+          } else if (strcmp(b->label, "pi") == 0) {
             strncat(graphEq, "pi", sizeof(graphEq) - strlen(graphEq) - 1);
           } else {
             char *pats[] = {"sin",  "cos",   "tan",  "log",  "ln",
@@ -1934,11 +1989,56 @@ void draw_graph_curve(NVGcontext *vg, float x, float y, float w, float h) {
   nvgSave(vg);
   nvgScissor(vg, x, y, w, h);
 
-  nvgBeginPath(vg);
-  nvgStrokeWidth(vg, 3.0f);
-  nvgStrokeColor(vg, nvgRGB(47, 128, 255)); // Blue curve
+  int inequality = 0; // 0: none, 1: <, 2: >, 3: <=, 4: >=
+  if (strstr(graphEq, "<="))
+    inequality = 3;
+  else if (strstr(graphEq, ">="))
+    inequality = 4;
+  else if (strchr(graphEq, '<'))
+    inequality = 1;
+  else if (strchr(graphEq, '>'))
+    inequality = 2;
 
   float scaleY = h / (yMax - yMin);
+
+  if (inequality > 0) {
+    nvgBeginPath(vg);
+    nvgFillColor(vg, nvgRGBA(47, 128, 255, 64)); // Light blue shade
+
+    for (int i = 0; i <= w; i++) {
+      float xv = xMin + (float)i / (float)w * (xMax - xMin);
+      float yv = (float)evaluate_graph(graphEq, xv);
+
+      if (isnan(yv) || isinf(yv) || yv > 1e6 || yv < -1e6)
+        continue;
+
+      float px = x + i;
+      float py = y + h - (yv - yMin) * scaleY;
+
+      if (i == 0) {
+        if (inequality == 1 || inequality == 3)
+          nvgMoveTo(vg, px, y + h); // Fill from bottom
+        else
+          nvgMoveTo(vg, px, y); // Fill from top
+      }
+      nvgLineTo(vg, px, py);
+    }
+
+    // Close the path
+    if (inequality == 1 || inequality == 3) {
+      nvgLineTo(vg, x + w, y + h);
+      nvgLineTo(vg, x, y + h);
+    } else {
+      nvgLineTo(vg, x + w, y);
+      nvgLineTo(vg, x, y);
+    }
+    nvgFill(vg);
+  }
+
+  // Draw the boundary line
+  nvgBeginPath(vg);
+  nvgStrokeWidth(vg, 2.0f);
+  nvgStrokeColor(vg, nvgRGB(47, 128, 255));
 
   int first = 1;
   for (int i = 0; i <= w; i++) {
@@ -2041,13 +2141,13 @@ void draw_graph_sidebar(NVGcontext *vg, float x, float y, float w, float h) {
   nvgText(vg, boxX + 10, boxY + boxH / 2, graphEq, NULL);
 
   // Sidebar Title
-  nvgFontSize(vg, 20);
-  nvgText(vg, x + 10, y + 30, "Expressions", NULL);
+  nvgFontSize(vg, 18);
+  nvgText(vg, x + 10, y + 25, "Expressions", NULL);
 
   // Toggle Icon
   nvgFontSize(vg, 18);
   nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-  nvgText(vg, x + w - 10, y + 30, isSidebarExpanded ? "<<" : ">>", NULL);
+  nvgText(vg, x + w - 10, y + 25, isSidebarExpanded ? "<<" : ">>", NULL);
 }
 
 void draw_graph_keypad(NVGcontext *vg, float x, float y, float w, float h) {
