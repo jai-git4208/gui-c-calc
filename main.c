@@ -110,7 +110,13 @@ int clickAnimIdx = -1;
 Uint32 clickAnimTime = 0;
 
 // Graphing state
-char graphEq[128] = "";
+typedef struct {
+  char eq[128];
+  NVGcolor color;
+} GraphEquation;
+
+GraphEquation graphEquations[5];
+int activeEqIdx = 0;
 float xMin = -10.0f, xMax = 10.0f;
 float yMin = -5.0f, yMax = 5.0f;
 int isSidebarExpanded = 1;
@@ -1262,8 +1268,17 @@ void initTheme() {
   theme_dark.text_primary = nvgRGB(255, 255, 255);
   theme_dark.text_secondary = nvgRGB(150, 150, 150);
   theme_dark.shadow = nvgRGBA(0, 0, 0, 128);
-
   current_theme = &theme_dark;
+
+  // Initialize graph equations
+  for (int i = 0; i < 5; i++) {
+    graphEquations[i].eq[0] = '\0';
+  }
+  graphEquations[0].color = nvgRGB(47, 128, 255); // Blue
+  graphEquations[1].color = nvgRGB(255, 47, 128); // Pink/Red
+  graphEquations[2].color = nvgRGB(128, 255, 47); // Green
+  graphEquations[3].color = nvgRGB(255, 128, 47); // Orange
+  graphEquations[4].color = nvgRGB(128, 47, 255); // Purple
 }
 
 void initGraphButtons(int page) {
@@ -1506,8 +1521,18 @@ void handleButtonClick(int x, int y) {
   }
 
   if (currentMode == MODE_GRAPH) {
+    // Handle switching active equation
+    if (isSidebarExpanded && x < sidebarW && y > 80 && y < 80 + 5 * 50) {
+      activeEqIdx = (int)((y - 80) / 50);
+      if (activeEqIdx < 0)
+        activeEqIdx = 0;
+      if (activeEqIdx > 4)
+        activeEqIdx = 4;
+      return;
+    }
+
     // Handle Sidebar toggle
-    if (x > sidebarX + sidebarW - 40 && x < sidebarX + sidebarW && y < 50) {
+    if (x > sidebarX + sidebarW - 40 && x < sidebarX + sidebarW && y < 80) {
       isSidebarExpanded = !isSidebarExpanded;
       updateLayout(w, h);
       return;
@@ -1518,11 +1543,11 @@ void handleButtonClick(int x, int y) {
       Button *b = &graphButtons[i];
       if (x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h) {
         if (strcmp(b->label, "CLR") == 0) {
-          graphEq[0] = '\0';
+          graphEquations[activeEqIdx].eq[0] = '\0';
         } else if (strcmp(b->label, "bksp") == 0) {
-          int len = strlen(graphEq);
+          int len = strlen(graphEquations[activeEqIdx].eq);
           if (len > 0)
-            graphEq[len - 1] = '\0';
+            graphEquations[activeEqIdx].eq[len - 1] = '\0';
         } else if (strcmp(b->label, "ABC") == 0) {
           graphKeypadPage = 1;
           initGraphButtons(1);
@@ -1538,26 +1563,27 @@ void handleButtonClick(int x, int y) {
         } else if (strcmp(b->label, "ENT") == 0) {
           // Re-render handled by main loop
         } else if (strlen(b->label) > 0 && strcmp(b->label, " ") != 0) {
+          char *curEq = graphEquations[activeEqIdx].eq;
           if (strcmp(b->label, "x²") == 0) {
-            strncat(graphEq, "^2", sizeof(graphEq) - strlen(graphEq) - 1);
+            strncat(curEq, "^2", 128 - strlen(curEq) - 1);
           } else if (strcmp(b->label, "xⁿ") == 0) {
-            strncat(graphEq, "^", sizeof(graphEq) - strlen(graphEq) - 1);
+            strncat(curEq, "^", 128 - strlen(curEq) - 1);
           } else if (strcmp(b->label, "sqrt") == 0 ||
                      strcmp(b->label, "√") == 0) {
-            strncat(graphEq, "sqrt(", sizeof(graphEq) - strlen(graphEq) - 1);
+            strncat(curEq, "sqrt(", 128 - strlen(curEq) - 1);
           } else if (strcmp(b->label, "abs") == 0) {
-            strncat(graphEq, "abs(", sizeof(graphEq) - strlen(graphEq) - 1);
+            strncat(curEq, "abs(", 128 - strlen(curEq) - 1);
           } else if (strcmp(b->label, "pi") == 0 ||
                      strcmp(b->label, "π") == 0) {
-            strncat(graphEq, "pi", sizeof(graphEq) - strlen(graphEq) - 1);
+            strncat(curEq, "pi", 128 - strlen(curEq) - 1);
           } else if (strcmp(b->label, "≤") == 0) {
-            strncat(graphEq, "<=", sizeof(graphEq) - strlen(graphEq) - 1);
+            strncat(curEq, "<=", 128 - strlen(curEq) - 1);
           } else if (strcmp(b->label, "≥") == 0) {
-            strncat(graphEq, ">=", sizeof(graphEq) - strlen(graphEq) - 1);
+            strncat(curEq, ">=", 128 - strlen(curEq) - 1);
           } else if (strcmp(b->label, "←") == 0) {
-            strncat(graphEq, "<", sizeof(graphEq) - strlen(graphEq) - 1);
+            strncat(curEq, "<", 128 - strlen(curEq) - 1);
           } else if (strcmp(b->label, "→") == 0) {
-            strncat(graphEq, ">", sizeof(graphEq) - strlen(graphEq) - 1);
+            strncat(curEq, ">", 128 - strlen(curEq) - 1);
           } else {
             char *pats[] = {"sin",  "cos",   "tan",  "log",  "ln",
                             "sign", "floor", "ceil", "asin", "acos",
@@ -1565,15 +1591,14 @@ void handleButtonClick(int x, int y) {
             int isFunc = 0;
             for (int k = 0; k < 15; k++) {
               if (strcmp(b->label, pats[k]) == 0) {
-                strncat(graphEq, b->label,
-                        sizeof(graphEq) - strlen(graphEq) - 1);
-                strncat(graphEq, "(", sizeof(graphEq) - strlen(graphEq) - 1);
+                strncat(curEq, b->label, 128 - strlen(curEq) - 1);
+                strncat(curEq, "(", 128 - strlen(curEq) - 1);
                 isFunc = 1;
                 break;
               }
             }
             if (!isFunc) {
-              strncat(graphEq, b->label, sizeof(graphEq) - strlen(graphEq) - 1);
+              strncat(curEq, b->label, 128 - strlen(curEq) - 1);
             }
           }
         }
@@ -1747,22 +1772,28 @@ void handleKeyboard(SDL_Keycode key) {
   }
 
   if (currentMode == MODE_GRAPH) {
+    if (key >= SDLK_1 && key <= SDLK_5 && (SDL_GetModState() & KMOD_ALT)) {
+      activeEqIdx = key - SDLK_1;
+      return;
+    }
     if (key == SDLK_BACKSPACE) {
-      int len = strlen(graphEq);
+      char *curEq = graphEquations[activeEqIdx].eq;
+      int len = strlen(curEq);
       if (len > 0)
-        graphEq[len - 1] = '\0';
+        curEq[len - 1] = '\0';
       return;
     }
     if (key == SDLK_DELETE) {
-      graphEq[0] = '\0';
+      graphEquations[activeEqIdx].eq[0] = '\0';
       return;
     }
     if (key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_ESCAPE) {
       return;
     }
     if (key >= 32 && key <= 126) {
+      char *curEq = graphEquations[activeEqIdx].eq;
       char s[2] = {(char)key, '\0'};
-      strncat(graphEq, s, sizeof(graphEq) - strlen(graphEq) - 1);
+      strncat(curEq, s, 128 - strlen(curEq) - 1);
       return;
     }
     return;
@@ -2019,88 +2050,84 @@ void draw_graph_grid(NVGcontext *vg, float x, float y, float w, float h) {
 }
 
 void draw_graph_curve(NVGcontext *vg, float x, float y, float w, float h) {
-  if (strlen(graphEq) == 0)
-    return;
-
   nvgSave(vg);
   nvgScissor(vg, x, y, w, h);
 
-  int inequality = 0; // 0: none, 1: <, 2: >, 3: <=, 4: >=
-  if (strstr(graphEq, "<="))
-    inequality = 3;
-  else if (strstr(graphEq, ">="))
-    inequality = 4;
-  else if (strchr(graphEq, '<'))
-    inequality = 1;
-  else if (strchr(graphEq, '>'))
-    inequality = 2;
+  for (int eqIdx = 0; eqIdx < 5; eqIdx++) {
+    char *eqStr = graphEquations[eqIdx].eq;
+    if (strlen(eqStr) == 0)
+      continue;
 
-  float scaleY = h / (yMax - yMin);
+    NVGcolor color = graphEquations[eqIdx].color;
+    int inequality = 0; // 0: none, 1: <, 2: >, 3: <=, 4: >=
+    if (strstr(eqStr, "<="))
+      inequality = 3;
+    else if (strstr(eqStr, ">="))
+      inequality = 4;
+    else if (strchr(eqStr, '<'))
+      inequality = 1;
+    else if (strchr(eqStr, '>'))
+      inequality = 2;
 
-  if (inequality > 0) {
+    float scaleY = h / (yMax - yMin);
+
+    if (inequality > 0) {
+      nvgBeginPath(vg);
+      NVGcolor fillColor = color;
+      fillColor.a = 0.25f;
+      nvgFillColor(vg, fillColor);
+
+      for (int i = 0; i <= w; i++) {
+        float xv = xMin + (float)i / (float)w * (xMax - xMin);
+        float yv = (float)evaluate_graph(eqStr, xv);
+        if (isnan(yv) || isinf(yv) || yv > 1e6 || yv < -1e6)
+          continue;
+        float px = x + i;
+        float py = y + h - (yv - yMin) * scaleY;
+        if (i == 0) {
+          if (inequality == 1 || inequality == 3)
+            nvgMoveTo(vg, px, y + h);
+          else
+            nvgMoveTo(vg, px, y);
+        }
+        nvgLineTo(vg, px, py);
+      }
+      if (inequality == 1 || inequality == 3) {
+        nvgLineTo(vg, x + w, y + h);
+        nvgLineTo(vg, x, y + h);
+      } else {
+        nvgLineTo(vg, x + w, y);
+        nvgLineTo(vg, x, y);
+      }
+      nvgFill(vg);
+    }
+
     nvgBeginPath(vg);
-    nvgFillColor(vg, nvgRGBA(47, 128, 255, 64)); // Light blue shade
-
+    nvgStrokeWidth(vg, 2.0f);
+    nvgStrokeColor(vg, color);
+    int first = 1;
     for (int i = 0; i <= w; i++) {
       float xv = xMin + (float)i / (float)w * (xMax - xMin);
-      float yv = (float)evaluate_graph(graphEq, xv);
-
-      if (isnan(yv) || isinf(yv) || yv > 1e6 || yv < -1e6)
+      float yv = (float)evaluate_graph(eqStr, xv);
+      if (isnan(yv) || isinf(yv) || yv > 1e6 || yv < -1e6) {
+        if (!first) {
+          nvgStroke(vg);
+          nvgBeginPath(vg);
+          first = 1;
+        }
         continue;
-
+      }
       float px = x + i;
       float py = y + h - (yv - yMin) * scaleY;
-
-      if (i == 0) {
-        if (inequality == 1 || inequality == 3)
-          nvgMoveTo(vg, px, y + h); // Fill from bottom
-        else
-          nvgMoveTo(vg, px, y); // Fill from top
+      if (first) {
+        nvgMoveTo(vg, px, py);
+        first = 0;
+      } else {
+        nvgLineTo(vg, px, py);
       }
-      nvgLineTo(vg, px, py);
     }
-
-    // Close the path
-    if (inequality == 1 || inequality == 3) {
-      nvgLineTo(vg, x + w, y + h);
-      nvgLineTo(vg, x, y + h);
-    } else {
-      nvgLineTo(vg, x + w, y);
-      nvgLineTo(vg, x, y);
-    }
-    nvgFill(vg);
+    nvgStroke(vg);
   }
-
-  // Draw the boundary line
-  nvgBeginPath(vg);
-  nvgStrokeWidth(vg, 2.0f);
-  nvgStrokeColor(vg, nvgRGB(47, 128, 255));
-
-  int first = 1;
-  for (int i = 0; i <= w; i++) {
-    float xv = xMin + (float)i / (float)w * (xMax - xMin);
-    float yv = (float)evaluate_graph(graphEq, xv);
-
-    if (isnan(yv) || isinf(yv) || yv > 1e6 || yv < -1e6) {
-      if (!first) {
-        nvgStroke(vg);
-        nvgBeginPath(vg);
-        first = 1;
-      }
-      continue;
-    }
-
-    float px = x + i;
-    float py = y + h - (yv - yMin) * scaleY;
-
-    if (first) {
-      nvgMoveTo(vg, px, py);
-      first = 0;
-    } else {
-      nvgLineTo(vg, px, py);
-    }
-  }
-  nvgStroke(vg);
   nvgRestore(vg);
 }
 
@@ -2158,30 +2185,46 @@ void draw_graph_sidebar(NVGcontext *vg, float x, float y, float w, float h) {
   nvgFillColor(vg, current_theme->btn_bg_action);
   nvgFill(vg);
 
-  // Expression input box
-  float boxX = x + 10;
-  float boxY = y + 80;
-  float boxW = w - 20;
-  float boxH = 40;
+  // Expression input boxes
+  for (int i = 0; i < 5; i++) {
+    float boxX = x + 10;
+    float boxY = y + 80 + i * 50;
+    float boxW = w - 20;
+    float boxH = 40;
 
-  nvgBeginPath(vg);
-  nvgRoundedRect(vg, boxX, boxY, boxW, boxH, 5);
-  nvgFillColor(vg, current_theme->display_bg);
-  nvgFill(vg);
-  nvgStrokeColor(vg, nvgRGB(47, 128, 255));
-  nvgStroke(vg);
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, boxX, boxY, boxW, boxH, 5);
+    nvgFillColor(vg, current_theme->display_bg);
+    nvgFill(vg);
 
-  nvgFillColor(vg, current_theme->text_primary);
-  nvgFontSize(vg, 18);
-  nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-  nvgText(vg, boxX + 10, boxY + boxH / 2, graphEq, NULL);
+    if (i == activeEqIdx) {
+      nvgStrokeColor(vg, nvgRGB(47, 128, 255));
+      nvgStrokeWidth(vg, 2.0f);
+    } else {
+      nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 32));
+      nvgStrokeWidth(vg, 1.0f);
+    }
+    nvgStroke(vg);
+
+    // Color indicator
+    nvgBeginPath(vg);
+    nvgCircle(vg, boxX + 15, boxY + boxH / 2, 5);
+    nvgFillColor(vg, graphEquations[i].color);
+    nvgFill(vg);
+
+    nvgFillColor(vg, current_theme->text_primary);
+    nvgFontSize(vg, 16);
+    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+    nvgText(vg, boxX + 30, boxY + boxH / 2, graphEquations[i].eq, NULL);
+  }
 
   // Sidebar Title
   nvgFontSize(vg, 18);
+  nvgFillColor(vg, current_theme->text_primary);
+  nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
   nvgText(vg, x + 10, y + 55, "Expressions", NULL);
 
   // Toggle Icon
-  nvgFontSize(vg, 18);
   nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
   nvgText(vg, x + w - 10, y + 55, isSidebarExpanded ? "<<" : ">>", NULL);
 }
