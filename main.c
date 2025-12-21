@@ -117,6 +117,16 @@ typedef struct {
 
 GraphEquation graphEquations[5];
 int activeEqIdx = 0;
+
+typedef struct {
+  float x;
+  float y;
+  int equationIdx;
+} GraphPoint;
+
+GraphPoint graphPoints[50];
+int numGraphPoints = 0;
+
 float xMin = -10.0f, xMax = 10.0f;
 float yMin = -5.0f, yMax = 5.0f;
 int isSidebarExpanded = 1;
@@ -402,6 +412,28 @@ double evaluate_graph(const char *expr, double xVal) {
 
   GraphParser p = {actualExpr};
   return parse_graph_comparison(&p, xVal);
+}
+
+void find_closest_point_on_line(float graphX, float *outY, int *outEqIdx) {
+  float minDist = 1e9;
+  *outY = 0;
+  *outEqIdx = -1;
+
+  for (int i = 0; i < 5; i++) {
+    if (strlen(graphEquations[i].eq) == 0)
+      continue;
+
+    float yVal = (float)evaluate_graph(graphEquations[i].eq, graphX);
+    if (isnan(yVal) || isinf(yVal) || yVal > 1e6 || yVal < -1e6)
+      continue;
+
+    float dist = fabs(yVal);
+    if (*outEqIdx == -1 || dist < minDist) {
+      minDist = dist;
+      *outY = yVal;
+      *outEqIdx = i;
+    }
+  }
 }
 
 void recordInput(const char *key) {
@@ -1543,7 +1575,14 @@ void handleButtonClick(int x, int y) {
       Button *b = &graphButtons[i];
       if (x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h) {
         if (strcmp(b->label, "CLR") == 0) {
+          static Uint32 lastClearTime = 0;
+          Uint32 now = SDL_GetTicks();
+          if (now - lastClearTime < 500) {
+            // Double tap - clear points
+            numGraphPoints = 0;
+          }
           graphEquations[activeEqIdx].eq[0] = '\0';
+          lastClearTime = now;
         } else if (strcmp(b->label, "bksp") == 0) {
           int len = strlen(graphEquations[activeEqIdx].eq);
           if (len > 0)
@@ -1604,6 +1643,24 @@ void handleButtonClick(int x, int y) {
         }
         triggerClickAnim(5, i);
         return;
+      }
+    }
+
+    // Handle graph area clicks to add points
+    if (x >= graphAreaX && x < graphAreaX + graphAreaW && y >= graphAreaY &&
+        y < graphAreaY + graphAreaH) {
+      // Convert screen coords to graph coords
+      float graphX = xMin + (x - graphAreaX) / graphAreaW * (xMax - xMin);
+      float graphY;
+      int eqIdx;
+
+      find_closest_point_on_line(graphX, &graphY, &eqIdx);
+
+      if (eqIdx != -1 && numGraphPoints < 50) {
+        graphPoints[numGraphPoints].x = graphX;
+        graphPoints[numGraphPoints].y = graphY;
+        graphPoints[numGraphPoints].equationIdx = eqIdx;
+        numGraphPoints++;
       }
     }
     return;
@@ -2128,6 +2185,35 @@ void draw_graph_curve(NVGcontext *vg, float x, float y, float w, float h) {
     }
     nvgStroke(vg);
   }
+
+  // Draw point markers
+  float scaleY = h / (yMax - yMin);
+  for (int i = 0; i < numGraphPoints; i++) {
+    GraphPoint *pt = &graphPoints[i];
+    NVGcolor color = graphEquations[pt->equationIdx].color;
+
+    // Convert graph coords to screen coords
+    float px = x + (pt->x - xMin) / (xMax - xMin) * w;
+    float py = y + h - (pt->y - yMin) * scaleY;
+
+    // Draw point circle
+    nvgBeginPath(vg);
+    nvgCircle(vg, px, py, 5);
+    nvgFillColor(vg, color);
+    nvgFill(vg);
+    nvgStrokeWidth(vg, 2.0f);
+    nvgStrokeColor(vg, nvgRGB(255, 255, 255));
+    nvgStroke(vg);
+
+    // Draw coordinate label
+    char coordText[64];
+    snprintf(coordText, sizeof(coordText), "(%.2f, %.2f)", pt->x, pt->y);
+    nvgFontSize(vg, 12);
+    nvgFillColor(vg, nvgRGB(255, 255, 255));
+    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+    nvgText(vg, px + 8, py - 8, coordText, NULL);
+  }
+
   nvgRestore(vg);
 }
 
