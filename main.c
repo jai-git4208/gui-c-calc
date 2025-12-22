@@ -143,6 +143,11 @@ void triggerClickAnim(int type, int idx) {
   clickAnimTime = SDL_GetTicks();
 }
 
+// Global panning state
+int isPanning = 0;
+int lastMouseX = 0;
+int lastMouseY = 0;
+
 void calc_inputEquals(void);
 void save_state(void);
 void load_state(void);
@@ -1651,16 +1656,25 @@ void handleButtonClick(int x, int y) {
         y < graphAreaY + graphAreaH) {
       // Convert screen coords to graph coords
       float graphX = xMin + (x - graphAreaX) / graphAreaW * (xMax - xMin);
-      float graphY;
-      int eqIdx;
+      float graphY =
+          yMin + (graphAreaY + graphAreaH - y) / graphAreaH * (yMax - yMin);
 
-      find_closest_point_on_line(graphX, &graphY, &eqIdx);
+      if (SDL_GetModState() & KMOD_SHIFT) {
+        // Drop a point into the active equation slot as a coordinate string
+        snprintf(graphEquations[activeEqIdx].eq,
+                 sizeof(graphEquations[activeEqIdx].eq), "(%.2f, %.2f)", graphX,
+                 graphY);
+      } else {
+        int eqIdx;
+        float closestY;
+        find_closest_point_on_line(graphX, &closestY, &eqIdx);
 
-      if (eqIdx != -1 && numGraphPoints < 50) {
-        graphPoints[numGraphPoints].x = graphX;
-        graphPoints[numGraphPoints].y = graphY;
-        graphPoints[numGraphPoints].equationIdx = eqIdx;
-        numGraphPoints++;
+        if (eqIdx != -1 && numGraphPoints < 50) {
+          graphPoints[numGraphPoints].x = graphX;
+          graphPoints[numGraphPoints].y = closestY;
+          graphPoints[numGraphPoints].equationIdx = eqIdx;
+          numGraphPoints++;
+        }
       }
     }
     return;
@@ -2116,6 +2130,24 @@ void draw_graph_curve(NVGcontext *vg, float x, float y, float w, float h) {
       continue;
 
     NVGcolor color = graphEquations[eqIdx].color;
+
+    // Check if it's a point expression "(x, y)"
+    float pxVal, pyVal;
+    if (sscanf(eqStr, " (%f, %f)", &pxVal, &pyVal) == 2) {
+      float scaleY = h / (yMax - yMin);
+      float sx = x + (pxVal - xMin) / (xMax - xMin) * w;
+      float sy = y + h - (pyVal - yMin) * scaleY;
+
+      nvgBeginPath(vg);
+      nvgCircle(vg, sx, sy, 5);
+      nvgFillColor(vg, color);
+      nvgFill(vg);
+      nvgStrokeWidth(vg, 2.0f);
+      nvgStrokeColor(vg, nvgRGB(255, 255, 255));
+      nvgStroke(vg);
+      continue;
+    }
+
     int inequality = 0; // 0: none, 1: <, 2: >, 3: <=, 4: >=
     if (strstr(eqStr, "<="))
       inequality = 3;
@@ -2693,109 +2725,141 @@ int main(int argc, char *argv[]) {
       if (e.type == SDL_QUIT) {
         quit = 1;
       } else if (e.type == SDL_MOUSEBUTTONDOWN) {
-        handleButtonClick(e.button.x, e.button.y);
+        if (currentMode == MODE_GRAPH && e.button.button == SDL_BUTTON_MIDDLE) {
+          isPanning = 1;
+          lastMouseX = e.button.x;
+          lastMouseY = e.button.y;
+        } else if (currentMode == MODE_GRAPH &&
+                   e.button.button == SDL_BUTTON_LEFT &&
+                   (SDL_GetModState() & KMOD_SHIFT)) {
+          // Point dropping handled in handleButtonClick or here
+          handleButtonClick(e.button.x, e.button.y);
+        } else {
+          handleButtonClick(e.button.x, e.button.y);
+        }
       } else if (e.type == SDL_MOUSEBUTTONUP) {
         isDrawing = 0;
         isEqualsDown = 0;
-      } else if (e.type == SDL_MOUSEMOTION && isDrawing && showDraw) {
-
-        int x = e.motion.x;
-        int y = e.motion.y;
-        int w, h;
-        SDL_GetWindowSize(gWindow, &w, &h);
-        int calcWidth = showHistory ? w - 200 : w;
-        int startY = 120;
-        int reservedBottom = 50;
-        int padH = h - startY - 20 - reservedBottom;
-        int padW = calcWidth - 40;
-        if (padH < 100)
-          padH = 100;
-
-        int cellSize = (padW < padH ? padW : padH) / 28;
-        int gridSize = 28 * cellSize;
-        int gridX = 20 + (padW - gridSize) / 2;
-        int gridY = startY + (padH - gridSize) / 2;
-
-        if (x >= gridX && x < gridX + gridSize && y >= gridY &&
-            y < gridY + gridSize) {
-          int col = (x - gridX) / cellSize;
-          int row = (y - gridY) / cellSize;
-          if (col >= 0 && col < 28 && row >= 0 && row < 28) {
-            drawGrid[row][col] = 1;
-            lastDrawTime = SDL_GetTicks();
-            hasDrawnSomething = 1;
-          }
+        if (e.button.button == SDL_BUTTON_MIDDLE) {
+          isPanning = 0;
         }
-      } else if (e.type == SDL_KEYDOWN) {
-        handleKeyboard(e.key.keysym.sym);
-      } else if (e.type == SDL_MOUSEWHEEL && currentMode == MODE_GRAPH) {
-        float scale = (e.wheel.y > 0) ? 0.9f : 1.1f;
-        float xRange = xMax - xMin;
-        float yRange = yMax - yMin;
-        float xMid = (xMax + xMin) / 2.0f;
-        float yMid = (yMax + yMin) / 2.0f;
+      } else if (e.type == SDL_MOUSEMOTION) {
+        if (isPanning && currentMode == MODE_GRAPH) {
+          int dx = e.motion.x - lastMouseX;
+          int dy = e.motion.y - lastMouseY;
+          lastMouseX = e.motion.x;
+          lastMouseY = e.motion.y;
 
-        xMin = xMid - (xRange * scale) / 2.0f;
-        xMax = xMid + (xRange * scale) / 2.0f;
-        yMin = yMid - (yRange * scale) / 2.0f;
-        yMax = yMid + (yRange * scale) / 2.0f;
+          float UnitsPerPixelX = (xMax - xMin) / graphAreaW;
+          float UnitsPerPixelY = (yMax - yMin) / graphAreaH;
+
+          xMin -= dx * UnitsPerPixelX;
+          xMax -= dx * UnitsPerPixelX;
+          yMin += dy * UnitsPerPixelY;
+          yMax += dy * UnitsPerPixelY;
+        }
+
+        if (isDrawing && showDraw) {
+
+          int x = e.motion.x;
+          int y = e.motion.y;
+          int w, h;
+          SDL_GetWindowSize(gWindow, &w, &h);
+          int calcWidth = showHistory ? w - 200 : w;
+          int startY = 120;
+          int reservedBottom = 50;
+          int padH = h - startY - 20 - reservedBottom;
+          int padW = calcWidth - 40;
+          if (padH < 100)
+            padH = 100;
+
+          int cellSize = (padW < padH ? padW : padH) / 28;
+          int gridSize = 28 * cellSize;
+          int gridX = 20 + (padW - gridSize) / 2;
+          int gridY = startY + (padH - gridSize) / 2;
+
+          if (x >= gridX && x < gridX + gridSize && y >= gridY &&
+              y < gridY + gridSize) {
+            int col = (x - gridX) / cellSize;
+            int row = (y - gridY) / cellSize;
+            if (col >= 0 && col < 28 && row >= 0 && row < 28) {
+              drawGrid[row][col] = 1;
+              lastDrawTime = SDL_GetTicks();
+              hasDrawnSomething = 1;
+            }
+          }
+        } else if (e.type == SDL_KEYDOWN) {
+          handleKeyboard(e.key.keysym.sym);
+        } else if (e.type == SDL_MOUSEWHEEL && currentMode == MODE_GRAPH) {
+          float scale = (e.wheel.y > 0) ? 0.9f : 1.1f;
+          float xRange = xMax - xMin;
+          float yRange = yMax - yMin;
+          float xMid = (xMax + xMin) / 2.0f;
+          float yMid = (yMax + yMin) / 2.0f;
+
+          xMin = xMid - (xRange * scale) / 2.0f;
+          xMax = xMid + (xRange * scale) / 2.0f;
+          yMin = yMid - (yRange * scale) / 2.0f;
+          yMax = yMid + (yRange * scale) / 2.0f;
+        }
       }
-    }
 
-    if (showDraw && hasDrawnSomething && !isDrawing) {
-      Uint32 now = SDL_GetTicks();
-      if (now - lastDrawTime > AUTO_PREDICT_DELAY) {
-        predictedDigit = predictDigit();
+      if (showDraw && hasDrawnSomething && !isDrawing) {
+        Uint32 now = SDL_GetTicks();
+        if (now - lastDrawTime > AUTO_PREDICT_DELAY) {
+          predictedDigit = predictDigit();
 
-        if (predictedDigit == -2) {
+          if (predictedDigit == -2) {
 
-          isHeartAnimActive = 1;
-          easterEggStart = SDL_GetTicks();
-        } else if (predictedDigit >= 0 && predictedDigit <= 9) {
+            isHeartAnimActive = 1;
+            easterEggStart = SDL_GetTicks();
+          } else if (predictedDigit >= 0 && predictedDigit <= 9) {
 
-          char digit[2] = {'0' + predictedDigit, '\0'};
-          calc_inputDigit(digit);
+            char digit[2] = {'0' + predictedDigit, '\0'};
+            calc_inputDigit(digit);
 
-          FILE *f = fopen("debug.log", "a");
-          if (f) {
-            fprintf(f, "Prediction: %d (Valid)\n", predictedDigit);
-            fclose(f);
+            FILE *f = fopen("debug.log", "a");
+            if (f) {
+              fprintf(f, "Prediction: %d (Valid)\n", predictedDigit);
+              fclose(f);
+            }
+
+          } else {
+            printf("Ignored invalid prediction: %d\n", predictedDigit);
+            FILE *f = fopen("debug.log", "a");
+            if (f) {
+              fprintf(f, "Prediction: %d (INVALID)\n", predictedDigit);
+              fclose(f);
+            }
           }
 
-        } else {
-          printf("Ignored invalid prediction: %d\n", predictedDigit);
-          FILE *f = fopen("debug.log", "a");
-          if (f) {
-            fprintf(f, "Prediction: %d (INVALID)\n", predictedDigit);
-            fclose(f);
+          for (int r = 0; r < 28; r++) {
+            for (int c = 0; c < 28; c++) {
+              drawGrid[r][c] = 0;
+            }
           }
+          hasDrawnSomething = 0;
         }
-
-        for (int r = 0; r < 28; r++) {
-          for (int c = 0; c < 28; c++) {
-            drawGrid[r][c] = 0;
-          }
-        }
-        hasDrawnSomething = 0;
       }
+
+      if (isRainbowMode) {
+        rainbowHue += 2.0f;
+        if (rainbowHue >= 360.0f)
+          rainbowHue -= 360.0f;
+      }
+
+      ui_render(win);
     }
 
-    if (isRainbowMode) {
-      rainbowHue += 2.0f;
-      if (rainbowHue >= 360.0f)
-        rainbowHue -= 360.0f;
-    }
+    save_state();
 
-    ui_render(win);
+    SDL_GL_DeleteContext(glContext);
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    return 0;
   }
-
-  save_state();
-
-  SDL_GL_DeleteContext(glContext);
-  SDL_DestroyWindow(win);
-  SDL_Quit();
-  return 0;
 }
+
 void save_state() {
   FILE *f = fopen("calc_state.dat", "wb");
   if (!f)
